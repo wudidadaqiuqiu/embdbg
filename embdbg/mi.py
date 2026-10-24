@@ -266,7 +266,7 @@ class MIClient:
         if os.name == "nt":
             kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         self._proc = subprocess.Popen(argv, **kwargs)
-        self._reader = threading.Thread(target=self._read_loop, name="focdbg-gdb-mi", daemon=True)
+        self._reader = threading.Thread(target=self._read_loop, name="embdbg-gdb-mi", daemon=True)
         self._reader.start()
         for cmd in (
             "-gdb-set pagination off",

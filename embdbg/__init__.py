@@ -1,4 +1,4 @@
-"""focdbg -- scriptable debug backend for J-Link targets.
+"""embdbg -- scriptable debug backend for J-Link targets.
 
 The public surface for embedding (GUI, pytest, CI) is :class:`DebugSession`; the
 CLI is a thin wrapper around it.  See ``README.md`` for the architecture.

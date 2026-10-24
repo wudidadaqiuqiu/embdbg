@@ -127,7 +127,7 @@ class JLinkGDBServer:
             self._proc = subprocess.Popen(argv, **kwargs)
         except OSError as exc:
             raise ServerError(f"cannot run {self.executable}: {exc}") from exc
-        self._reader = threading.Thread(target=self._read_loop, name="focdbg-jlink-server", daemon=True)
+        self._reader = threading.Thread(target=self._read_loop, name="embdbg-jlink-server", daemon=True)
         self._reader.start()
 
         # The server's stdout is block-buffered when it is a pipe, so readiness

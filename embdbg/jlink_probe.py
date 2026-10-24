@@ -88,7 +88,7 @@ class JLinkProbe:
             import pylink
         except ImportError as exc:  # pragma: no cover - environment dependent
             raise ConfigError(
-                "pylink-square is required for `focdbg serve`; run: pip install pylink-square"
+                "pylink-square is required for `embdbg serve`; run: pip install pylink-square"
             ) from exc
         self._pylink = pylink
         link = pylink.JLink()

@@ -10,7 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from focdbg.rsp import RspServer  # noqa: E402
+from embdbg.rsp import RspServer  # noqa: E402
 
 
 class FakeProbe:
@@ -52,7 +52,7 @@ class FakeProbe:
     def read_gdb_registers(self):
         import struct
 
-        from focdbg.jlink_probe import GDB_REG_ORDER
+        from embdbg.jlink_probe import GDB_REG_ORDER
 
         return b"".join(struct.pack("<I", self.regs[n]) for n in GDB_REG_ORDER)
 

@@ -10,7 +10,7 @@ Implemented (enough for arm-none-eabi-gdb / VSCode):
   qXfer:features:read, qRcmd, R, D, k, qC, qfThreadInfo/qsThreadInfo, qAttached.
 
 Not implemented (deliberately):
-  flash programming via vFlash* / GDB ``load`` -- use ``focdbg flash`` instead.
+  flash programming via vFlash* / GDB ``load`` -- use ``embdbg flash`` instead.
 """
 
 from __future__ import annotations
@@ -100,7 +100,7 @@ class RspServer:
         sock.settimeout(0.2)
         self._sock = sock
         self._port = sock.getsockname()[1]
-        self._thread = threading.Thread(target=self._accept_loop, name="focdbg-rsp", daemon=True)
+        self._thread = threading.Thread(target=self._accept_loop, name="embdbg-rsp", daemon=True)
         self._thread.start()
         return self
 

@@ -10,8 +10,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from focdbg.errors import ConfigError  # noqa: E402
-from focdbg.sampler import (  # noqa: E402
+from embdbg.errors import ConfigError  # noqa: E402
+from embdbg.sampler import (  # noqa: E402
     Sample,
     Sampler,
     csv_header,

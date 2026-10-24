@@ -16,7 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from focdbg.mi import MIClient  # noqa: E402
+from embdbg.mi import MIClient  # noqa: E402
 
 GCC = shutil.which("gcc")
 GDB = shutil.which("gdb")
@@ -53,7 +53,7 @@ int main(void) {
 class TestNativeStopEvents(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.tmp = Path(tempfile.mkdtemp(prefix="focdbg-native-"))
+        cls.tmp = Path(tempfile.mkdtemp(prefix="embdbg-native-"))
         source = cls.tmp / "prog.c"
         source.write_text(SOURCE, encoding="utf-8")
         cls.exe = cls.tmp / ("prog.exe" if os.name == "nt" else "prog")

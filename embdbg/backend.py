@@ -181,7 +181,7 @@ class JLinkGdbBackend(Backend):
             if not cfg.device:
                 raise ConfigError(
                     "no target device configured; pass --device STM32G431CB or add "
-                    "`device = \"STM32G431CB\"` to focdbg.toml"
+                    "`device = \"STM32G431CB\"` to embdbg.toml"
                 )
             gdb = find_gdb(cfg.gdb)
             server_exe = find_jlink_server(cfg.jlink_server)
@@ -329,7 +329,7 @@ class JLinkGdbBackend(Backend):
         else:
             import tempfile
 
-            directory = Path(tempfile.mkdtemp(prefix="focdbg-"))
+            directory = Path(tempfile.mkdtemp(prefix="embdbg-"))
         directory.mkdir(parents=True, exist_ok=True)
         return str(directory / f"jlink-gdbserver-{int(time.time())}.log")
 

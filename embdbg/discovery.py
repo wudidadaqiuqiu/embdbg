@@ -160,7 +160,7 @@ def list_probes(jlink_exe: str | os.PathLike) -> list[ProbeInfo]:
     exe = _expand(jlink_exe)
     if not exe.is_file():
         raise ToolNotFoundError(str(jlink_exe))
-    fd, script = tempfile.mkstemp(prefix="focdbg-emu-", suffix=".jlink")
+    fd, script = tempfile.mkstemp(prefix="embdbg-emu-", suffix=".jlink")
     try:
         with os.fdopen(fd, "w", encoding="ascii") as fh:
             fh.write("ShowEmuList\nq\n")

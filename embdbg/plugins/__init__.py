@@ -1,13 +1,13 @@
 """Plugin framework.
 
-A plugin is a named lifecycle object that can extend focdbg without touching the
+A plugin is a named lifecycle object that can extend embdbg without touching the
 core.  Plugins are discovered from:
 
   * the built-in registry (``serial`` today),
-  * Python entry points in the ``focdbg.plugins`` group, and
+  * Python entry points in the ``embdbg.plugins`` group, and
   * explicit ``module:Class`` specs (``--plugin mypkg.mymod:MyPlugin``).
 
-Configuration lives in ``focdbg.toml``::
+Configuration lives in ``embdbg.toml``::
 
     [plugins.serial]
     port = "COM3"

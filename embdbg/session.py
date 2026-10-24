@@ -2,7 +2,7 @@
 
 This is the object a GUI (or pytest, or a Jupyter notebook) should hold::
 
-    from focdbg import Config, DebugSession
+    from embdbg import Config, DebugSession
 
     with DebugSession(Config.load()) as session:
         session.reset(halt=True)

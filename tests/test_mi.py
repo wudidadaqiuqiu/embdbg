@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from focdbg.mi import parse_mi_record  # noqa: E402
+from embdbg.mi import parse_mi_record  # noqa: E402
 
 
 class TestMIParser(unittest.TestCase):
@@ -91,7 +91,7 @@ class TestMIParser(unittest.TestCase):
         self.assertEqual(values[1]["value"], "0x800b3a4")
 
     def test_rejects_garbage(self):
-        from focdbg.errors import GdbProtocolError
+        from embdbg.errors import GdbProtocolError
 
         with self.assertRaises(GdbProtocolError):
             parse_mi_record("not mi at all")

@@ -1,12 +1,10 @@
 """Command line interface.
 
-Subcommands deliberately mirror pyOCD's vocabulary:
-
-    focdbg probes                  (pyocd list)
-    focdbg flash  <file>           (pyocd flash)
-    focdbg gdbserver               (pyocd gdbserver)
-    focdbg console                 (pyocd commander)
-    focdbg json <command>          (machine-readable one-shot)
+    embdbg probes / info / doctor
+    embdbg flash <file> / reset
+    embdbg gdbserver / serve        (GDB RSP for Ozone / plain gdb, breakpoints)
+    embdbg serial / plugins
+    embdbg hss                      (high-speed DWARF-aware sampling)
 """
 
 from __future__ import annotations
@@ -22,7 +20,6 @@ from typing import Any
 
 from . import __version__
 from .config import Config
-from .console import CommandInterpreter
 from .discovery import find_elf, find_gdb, find_jlink_exe, find_jlink_server, gdb_version, list_probes
 from .errors import ConfigError, FocdbgError, TargetError, ToolNotFoundError
 from .dwarf_symbols import DwarfSymbols, ResolvedField
@@ -56,7 +53,7 @@ _OVERRIDE_KEYS = (
 def _add_common(parser: argparse.ArgumentParser, *, suppress: bool = False) -> None:
     default = argparse.SUPPRESS if suppress else None
     flag_default = argparse.SUPPRESS if suppress else False
-    parser.add_argument("--config", default=default, help="path to focdbg.toml")
+    parser.add_argument("--config", default=default, help="path to embdbg.toml")
     parser.add_argument("--device", default=default, help="target device (e.g. STM32G431CB)")
     parser.add_argument("--interface", default=default, choices=("SWD", "JTAG"), help="debug interface")
     parser.add_argument("--speed", dest="speed_khz", type=int, default=default, help="interface speed in kHz")
@@ -73,10 +70,10 @@ def _add_common(parser: argparse.ArgumentParser, *, suppress: bool = False) -> N
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="focdbg",
+        prog="embdbg",
         description="Scriptable J-Link debug backend (J-Link GDB server + arm-none-eabi-gdb).",
     )
-    parser.add_argument("--version", action="version", version=f"focdbg {__version__}")
+    parser.add_argument("--version", action="version", version=f"embdbg {__version__}")
     _add_common(parser)
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -105,16 +102,6 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("gdbserver", help="run only the J-Link GDB server (for IDEs / plain gdb)")
     p.add_argument("--port", type=int, default=None, help="explicit TCP port")
     p.add_argument("--timeout", type=float, default=None, help="seconds to wait for a client")
-    _add_common(p, suppress=True)
-
-    p = sub.add_parser("console", aliases=["commander"], help="interactive commander-style debug console")
-    p.add_argument("-c", "--command", dest="commands", action="append", default=[], help="run a command and exit (repeatable)")
-    p.add_argument("--interactive", action="store_true", help="enter the REPL after -c commands")
-    p.add_argument("--keep-going", action="store_true", help="continue after a failed -c command")
-    _add_common(p, suppress=True)
-
-    p = sub.add_parser("json", help="run one console command and print JSON")
-    p.add_argument("commands", nargs=argparse.REMAINDER, help="command to execute")
     _add_common(p, suppress=True)
 
     p = sub.add_parser("plugins", help="list available and configured plugins")
@@ -162,21 +149,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--plugin", action="append", default=[], help="extra plugin to load (repeatable)")
     _add_common(p, suppress=True)
 
-    p = sub.add_parser("sample", help="periodically sample memory (variables / RAM ring buffer)")
-    p.add_argument("--symbol", default=None, help="variable or buffer symbol")
-    p.add_argument("--address", default=None, help="raw address instead of --symbol")
-    p.add_argument("--size", type=int, default=None, help="bytes per sample (defaults to the field layout size)")
-    p.add_argument("--fields", default=None, help="layout: name:type[@offset],... (u8/i8/u16/i16/u32/i32/u64/i64/f32/f64)")
-    p.add_argument("--rate", type=float, default=None, help="samples per second (default: as fast as possible)")
-    p.add_argument("--duration", type=float, default=None, help="stop after N seconds")
-    p.add_argument("--count", type=int, default=None, help="stop after N samples")
-    p.add_argument("--out", default=None, help="write CSV/JSONL here instead of stdout")
-    p.add_argument("--format", choices=("csv", "jsonl"), default="csv")
-    p.add_argument("--resume", action="store_true", help="resume the target before sampling (connect halts it)")
-    p.add_argument("--halt", dest="halt", action="store_true", default=None, help="halt/resume around each sample (default)")
-    p.add_argument("--no-halt", dest="halt", action="store_false", help="read while running (backend permitting)")
-    _add_common(p, suppress=True)
-
     p = sub.add_parser(
         "hss",
         help="live sample variables at high speed via J-Link DLL (DWARF-aware, no halt)",
@@ -210,16 +182,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--coalesce-gap", type=int, default=32, help="max gap in bytes between fields to coalesce")
     _add_common(p, suppress=True)
 
-    p = sub.add_parser("dump", help="dump a memory range or decode a RAM ring buffer")
-    p.add_argument("--symbol", default=None, help="variable or buffer symbol")
-    p.add_argument("--address", default=None, help="raw address instead of --symbol")
-    p.add_argument("--length", type=int, required=True, help="number of bytes")
-    p.add_argument("--fields", default=None, help="decode the block as records with this layout")
-    p.add_argument("--format", choices=("hex", "bin", "csv"), default="hex")
-    p.add_argument("--resume", action="store_true", help="resume the target after reading")
-    p.add_argument("--out", default=None, help="output file (required for --format bin)")
-    _add_common(p, suppress=True)
-
     return parser
 
 
@@ -246,7 +208,7 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:  # pragma: no cover - last-resort guard
         import traceback
 
-        print(f"focdbg: internal error: {exc}", file=sys.stderr)
+        print(f"embdbg: internal error: {exc}", file=sys.stderr)
         if getattr(args, "verbose", False):
             traceback.print_exc()
         return 70
@@ -261,16 +223,11 @@ def _dispatch(args: argparse.Namespace) -> int:
         "flash": _cmd_flash,
         "reset": _cmd_reset,
         "gdbserver": _cmd_gdbserver,
-        "console": _cmd_console,
-        "commander": _cmd_console,
-        "json": _cmd_json,
         "plugins": _cmd_plugins,
         "serial": _cmd_serial,
         "serve": _cmd_serve,
         "gdb": _cmd_serve,
-        "sample": _cmd_sample,
         "hss": _cmd_hss,
-        "dump": _cmd_dump,
     }
     return handlers[args.command](args)
 
@@ -294,7 +251,7 @@ def _open_session(args: argparse.Namespace) -> DebugSession:
             config.validate()
     if getattr(args, "verbose", False):
         print(
-            f"focdbg: device={config.device} interface={config.interface} "
+            f"embdbg: device={config.device} interface={config.interface} "
             f"speed={config.speed_khz}kHz elf={config.elf}",
             file=sys.stderr,
         )
@@ -330,7 +287,7 @@ def _report_error(exc: FocdbgError, json_mode: bool) -> None:
             payload["detail"] = exc.detail
         _print_json(payload)
     else:
-        print(f"focdbg: error: {exc.message}", file=sys.stderr)
+        print(f"embdbg: error: {exc.message}", file=sys.stderr)
         if exc.detail:
             for line in str(exc.detail).splitlines():
                 print(f"  | {line}", file=sys.stderr)
@@ -511,44 +468,6 @@ def _cmd_gdbserver(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_console(args: argparse.Namespace) -> int:
-    json_mode = bool(getattr(args, "json", False))
-    session = _open_session(args)
-    interpreter = CommandInterpreter(session, json_mode=json_mode)
-    exit_code = 0
-    try:
-        for line in args.commands:
-            result = interpreter.execute_line(line)
-            _print_result(result, json_mode)
-            if not result.ok:
-                exit_code = 1
-                if not args.keep_going:
-                    return exit_code
-            if interpreter.exit_requested:
-                return exit_code
-        if args.commands and not args.interactive:
-            return exit_code
-        _repl(interpreter, json_mode)
-    finally:
-        session.disconnect()
-    return exit_code
-
-
-def _cmd_json(args: argparse.Namespace) -> int:
-    line = " ".join(args.commands).strip()
-    if not line:
-        raise ConfigError("usage: focdbg json <command>")
-    args.json = True
-    session = _open_session(args)
-    interpreter = CommandInterpreter(session, json_mode=True)
-    try:
-        result = interpreter.execute_line(line)
-        print(json.dumps(result.to_dict(), ensure_ascii=False))
-        return 0 if result.ok else 1
-    finally:
-        session.disconnect()
-
-
 def _cmd_plugins(args: argparse.Namespace) -> int:
     return cmd_plugins(args, _make_config(args))
 
@@ -640,7 +559,7 @@ def _cmd_serve(args: argparse.Namespace) -> int:
                 finally:
                     out.flush()
 
-            sampler_thread = threading.Thread(target=run_sampler, name="focdbg-sampler", daemon=True)
+            sampler_thread = threading.Thread(target=run_sampler, name="embdbg-sampler", daemon=True)
             sampler_thread.start()
             target = args.sample or args.sample_address
             where = f" -> {args.sample_out}" if args.sample_out else ""
@@ -690,55 +609,6 @@ def _target_address(session: DebugSession, args: argparse.Namespace) -> int:
         except ValueError as exc:
             raise ConfigError(f"invalid address {args.address!r}") from exc
     raise ConfigError("specify --symbol or --address")
-
-
-def _cmd_sample(args: argparse.Namespace) -> int:
-    session = _open_session(args)
-    out = None
-    try:
-        address = _target_address(session, args)
-        fields = parse_fields(args.fields) if args.fields else []
-        layout_size = fields_size(fields) if fields else 0
-        size = args.size if args.size is not None else layout_size
-        if size <= 0:
-            raise ConfigError("--size is required when --fields is absent")
-        if layout_size and size < layout_size:
-            raise ConfigError(f"--size {size} is smaller than the field layout ({layout_size} bytes)")
-
-        out = open(args.out, "w", newline="", encoding="utf-8") if args.out else sys.stdout
-        if args.format == "csv":
-            print(csv_header(fields), file=out)
-
-        def on_sample(sample) -> None:
-            print(format_sample(sample, fields, args.format), file=out)
-            if sample.index % 64 == 0:
-                out.flush()
-
-        if args.resume:
-            session.resume()
-        halt = True if args.halt is None else args.halt
-        sampler = Sampler(
-            session,
-            address,
-            size,
-            fields,
-            rate_hz=args.rate,
-            duration=args.duration,
-            count=args.count,
-            halt=halt,
-        )
-        stats = sampler.run(on_sample)
-        out.flush()
-        print(
-            f"sampled {stats.samples} sample(s) in {stats.elapsed_s:.3f}s "
-            f"({stats.rate_hz:.1f} Hz, {stats.overruns} overrun(s))",
-            file=sys.stderr,
-        )
-        return 0
-    finally:
-        if out is not None and out is not sys.stdout:
-            out.close()
-        session.disconnect()
 
 
 def _hss_fields(dwarf: DwarfSymbols, exprs: list[str], structs: list[str],
@@ -1032,70 +902,6 @@ def _cmd_hss(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
     return 0
-
-
-def _cmd_dump(args: argparse.Namespace) -> int:
-    session = _open_session(args)
-    try:
-        address = _target_address(session, args)
-        data = session.read_memory(address, args.length)
-        if args.resume:
-            session.resume()
-        fields = parse_fields(args.fields) if args.fields else None
-
-        if args.format == "bin":
-            if not args.out:
-                raise ConfigError("--out is required for --format bin")
-            Path(args.out).write_bytes(data)
-            print(f"wrote {len(data)} byte(s) to {args.out}", file=sys.stderr)
-            return 0
-
-        if args.format == "csv":
-            if not fields:
-                raise ConfigError("--fields is required for --format csv")
-            record_size = fields_size(fields)
-            rows = ["index,address," + ",".join(f.name for f in fields)]
-            for index in range(len(data) // record_size):
-                chunk = data[index * record_size : (index + 1) * record_size]
-                values = decode_fields(chunk, fields)
-                cells = [str(index), f"0x{address + index * record_size:08x}"]
-                cells += [f"{v:.9g}" if isinstance(v, float) else str(v) for v in values.values()]
-                rows.append(",".join(cells))
-            text = chr(10).join(rows)
-            if args.out:
-                Path(args.out).write_text(text + chr(10), encoding="utf-8")
-                print(f"wrote {len(rows) - 1} record(s) to {args.out}", file=sys.stderr)
-            else:
-                print(text)
-            return 0
-
-        text = hexdump(data, address)
-        if args.out:
-            Path(args.out).write_text(text + chr(10), encoding="utf-8")
-            print(f"wrote {len(data)} byte(s) to {args.out}", file=sys.stderr)
-        else:
-            print(text)
-        return 0
-    finally:
-        session.disconnect()
-
-
-# ----------------------------------------------------------------------
-# REPL
-# ----------------------------------------------------------------------
-def _repl(interpreter: CommandInterpreter, json_mode: bool) -> None:
-    if not json_mode:
-        print("focdbg console -- type 'help' for commands, 'exit' to quit")
-    while True:
-        try:
-            line = input("focdbg> ")
-        except (EOFError, KeyboardInterrupt):
-            print()
-            return
-        result = interpreter.execute_line(line)
-        _print_result(result, json_mode)
-        if interpreter.exit_requested:
-            return
 
 
 def _print_result(result, json_mode: bool) -> None:

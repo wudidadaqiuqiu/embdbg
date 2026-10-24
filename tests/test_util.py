@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from focdbg.util import find_free_ports, hexdump, mi_quote, parse_int  # noqa: E402
+from embdbg.util import find_free_ports, hexdump, mi_quote, parse_int  # noqa: E402
 
 
 class TestParseInt(unittest.TestCase):

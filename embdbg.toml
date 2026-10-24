@@ -1,0 +1,21 @@
+[embdbg]
+# ---- example configuration; copy to your firmware repository ----
+# Target / probe
+device = "STM32G431CB"          # J-Link device name (example)
+interface = "SWD"
+speed_khz = 1000
+
+# Keep false to stay halted after programming (breakpoints), true for CI.
+run_after_flash = false
+
+# ELF with DWARF: used for symbols/fields/pointers. Relative paths resolve
+# from the process working directory.
+elf = "build/Debug/firmware.elf"
+
+# Toolchain (leave empty for auto-discovery)
+# gdb = "C:/path/to/arm-none-eabi-gdb.exe"
+# jlink_server = "C:/Program Files/SEGGER/JLink/JLinkGDBServerCL.exe"
+
+# Behaviour
+singlerun = true
+verify = true

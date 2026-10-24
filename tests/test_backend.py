@@ -13,9 +13,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from focdbg.backend import JLinkGdbBackend  # noqa: E402
-from focdbg.config import Config  # noqa: E402
-from focdbg.mi import MIRecord  # noqa: E402
+from embdbg.backend import JLinkGdbBackend  # noqa: E402
+from embdbg.config import Config  # noqa: E402
+from embdbg.mi import MIRecord  # noqa: E402
 
 
 def done(payload=None):

@@ -1,4 +1,4 @@
-"""Exception hierarchy for focdbg.
+"""Exception hierarchy for embdbg.
 
 Everything user-facing derives from :class:`FocdbgError`, which carries an
 ``exit_code`` so the CLI can map failures to shell exit codes and the GUI can
@@ -9,7 +9,7 @@ from __future__ import annotations
 
 
 class FocdbgError(Exception):
-    """Base class for all focdbg errors."""
+    """Base class for all embdbg errors."""
 
     exit_code = 1
 

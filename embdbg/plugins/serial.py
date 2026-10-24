@@ -3,7 +3,7 @@
 Accepts a device name (``COM3``, ``/dev/ttyUSB0``) or a pyserial URL
 (``loop://``, ``socket://host:port``), which makes it testable without hardware.
 
-Configuration (``[plugins.serial]`` in focdbg.toml, or the ``serial`` CLI):
+Configuration (``[plugins.serial]`` in embdbg.toml, or the ``serial`` CLI):
 
     port      = "COM3"        # required
     baudrate  = 115200
@@ -236,7 +236,7 @@ class SerialPlugin(Plugin):
             self._open_sink()
             self._stop.clear()
             self._thread = threading.Thread(
-                target=self._background_monitor, name="focdbg-serial", daemon=True
+                target=self._background_monitor, name="embdbg-serial", daemon=True
             )
             self._thread.start()
 

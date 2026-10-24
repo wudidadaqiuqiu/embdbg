@@ -10,9 +10,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from focdbg.config import Config  # noqa: E402
-from focdbg.plugins.base import Plugin, PluginError, PluginManager  # noqa: E402
-from focdbg.plugins.serial import SerialPlugin, encode_payload  # noqa: E402
+from embdbg.config import Config  # noqa: E402
+from embdbg.plugins.base import Plugin, PluginError, PluginManager  # noqa: E402
+from embdbg.plugins.serial import SerialPlugin, encode_payload  # noqa: E402
 
 
 class CountingPlugin(Plugin):
@@ -51,9 +51,9 @@ class TestPluginManager(unittest.TestCase):
 
     def test_load_from_config(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "focdbg.toml"
+            path = Path(tmp) / "embdbg.toml"
             path.write_text(
-                "[focdbg]\ndevice = \"STM32G431CB\"\n\n"
+                "[embdbg]\ndevice = \"STM32G431CB\"\n\n"
                 "[plugins.serial]\nport = \"loop://\"\nmode = \"idle\"\n",
                 encoding="utf-8",
             )
@@ -68,7 +68,7 @@ class TestPluginManager(unittest.TestCase):
 
     def test_disabled_plugin_is_skipped(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "focdbg.toml"
+            path = Path(tmp) / "embdbg.toml"
             path.write_text(
                 "[plugins.serial]\nport = \"loop://\"\nenabled = false\n",
                 encoding="utf-8",

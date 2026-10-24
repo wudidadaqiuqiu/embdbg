@@ -13,9 +13,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from focdbg.discovery import find_gdb  # noqa: E402
-from focdbg.errors import ToolNotFoundError  # noqa: E402
-from focdbg.mi import MIClient  # noqa: E402
+from embdbg.discovery import find_gdb  # noqa: E402
+from embdbg.errors import ToolNotFoundError  # noqa: E402
+from embdbg.mi import MIClient  # noqa: E402
 
 PROJECT_ROOT = Path(r"C:\docs\uni\research\PAT\foc\foc_open\software\Source_Project")
 ELF = PROJECT_ROOT / "build" / "Debug" / "foc.elf"
@@ -63,7 +63,7 @@ class TestOfflineGdb(unittest.TestCase):
         self.assertIn("main", text)
 
     def test_error_is_raised(self):
-        from focdbg.errors import GdbError
+        from embdbg.errors import GdbError
 
         with self.assertRaises(GdbError):
             self.client.execute('-data-evaluate-expression "no_such_symbol_xyz"')

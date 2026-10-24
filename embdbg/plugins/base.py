@@ -1,4 +1,4 @@
-"""Base classes for focdbg plugins."""
+"""Base classes for embdbg plugins."""
 
 from __future__ import annotations
 
@@ -60,12 +60,12 @@ class Plugin(abc.ABC):
         return {"name": self.name, "description": self.description}
 
 
-#: Plugins shipped with focdbg (``name -> "module:Class"``).
+#: Plugins shipped with embdbg (``name -> "module:Class"``).
 BUILTIN_PLUGINS: dict[str, str] = {
-    "serial": "focdbg.plugins.serial:SerialPlugin",
+    "serial": "embdbg.plugins.serial:SerialPlugin",
 }
 
-ENTRY_POINT_GROUP = "focdbg.plugins"
+ENTRY_POINT_GROUP = "embdbg.plugins"
 
 
 class PluginManager:
@@ -120,7 +120,7 @@ class PluginManager:
                 f"plugin {spec!r} must accept (options, context): {exc}"
             ) from exc
         if not isinstance(plugin, Plugin):
-            raise PluginError(f"{import_spec!r} is not a focdbg.plugins.Plugin")
+            raise PluginError(f"{import_spec!r} is not a embdbg.plugins.Plugin")
         if not plugin.name:
             plugin.name = spec.split(":")[-1]
         self.plugins[plugin.name] = plugin

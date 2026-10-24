@@ -1,4 +1,4 @@
-"""Configuration loading: defaults < focdbg.toml < environment < CLI."""
+"""Configuration loading: defaults < embdbg.toml < environment < CLI."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ try:  # Python 3.11+
 except ModuleNotFoundError:  # pragma: no cover
     tomllib = None  # type: ignore[assignment]
 
-CONFIG_NAME = "focdbg.toml"
+CONFIG_NAME = "embdbg.toml"
 VALID_INTERFACES = ("SWD", "JTAG")
 
 
@@ -171,9 +171,9 @@ def _candidate_paths(explicit: str | os.PathLike | None) -> list[Path]:
     if os.name == "nt":
         appdata = os.environ.get("APPDATA")
         if appdata:
-            paths.append(Path(appdata) / "focdbg" / CONFIG_NAME)
+            paths.append(Path(appdata) / "embdbg" / CONFIG_NAME)
     else:
-        paths.append(Path.home() / ".config" / "focdbg" / CONFIG_NAME)
+        paths.append(Path.home() / ".config" / "embdbg" / CONFIG_NAME)
     seen: set[Path] = set()
     unique = []
     for p in paths:
@@ -202,9 +202,9 @@ def _read_config_file(
             raise ConfigError(f"cannot read config {candidate}: {exc}") from exc
         except tomllib.TOMLDecodeError as exc:
             raise ConfigError(f"invalid TOML in {candidate}: {exc}") from exc
-        table = raw.get("focdbg", raw)
+        table = raw.get("embdbg", raw)
         if not isinstance(table, dict):
-            raise ConfigError(f"{candidate}: [focdbg] must be a table")
+            raise ConfigError(f"{candidate}: [embdbg] must be a table")
         table = dict(table)
         plugins = table.pop("plugins", {})
         top_level = raw.get("plugins", {})

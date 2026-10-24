@@ -11,7 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from focdbg.cli import main  # noqa: E402
+from embdbg.cli import main  # noqa: E402
 
 
 def run_cli(argv):
