@@ -13,6 +13,7 @@ import argparse
 import ctypes
 import struct
 import json
+import re
 import sys
 import threading
 import time
@@ -94,10 +95,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-run", dest="run", action="store_false", help="stay halted after flashing")
     p.add_argument("--verify", dest="verify", action="store_true", default=None, help="verify after flashing")
     p.add_argument("--no-verify", dest="verify", action="store_false", help="skip verification")
+    p.add_argument("--gdb-flash", action="store_true", help="use the GDB-server flash path (slow; default is the J-Link DLL)")
     _add_common(p, suppress=True)
 
     p = sub.add_parser("reset", help="reset the target")
     p.add_argument("--run", action="store_true", help="run instead of staying halted")
+    _add_common(p, suppress=True)
+
+    p = sub.add_parser("rtt", help="read SEGGER RTT channel data")
+    p.add_argument("--channel", type=int, default=0, help="RTT up channel (default 0)")
+    p.add_argument("--duration", type=float, default=2.0, help="seconds to read")
+    p.add_argument("--out", default=None, help="raw output file")
+    p.add_argument("--no-run", action="store_true", help="leave the target halted")
     _add_common(p, suppress=True)
 
     p = sub.add_parser("read", help="read a variable, field, array element or a->b->c pointer chain")
@@ -232,6 +241,7 @@ def _dispatch(args: argparse.Namespace) -> int:
         "info": _cmd_info,
         "flash": _cmd_flash,
         "reset": _cmd_reset,
+        "rtt": _cmd_rtt,
         "read": _cmd_read,
         "write": _cmd_write,
         "gdbserver": _cmd_gdbserver,
@@ -396,6 +406,69 @@ def to_hex(value: int | None) -> str:
     return f"0x{value:08x}" if value is not None else "-"
 
 
+def _flash_pylink(args: argparse.Namespace, base) -> int:
+    config = _make_config(args)
+    if config.elf is None:
+        discovered = find_elf(None, Path.cwd())
+        if discovered is not None:
+            config.elf = str(discovered)
+    if not config.device:
+        raise ConfigError("no target device configured")
+    path = args.file
+    run = args.run if args.run is not None else config.run_after_flash
+    verify = args.verify if args.verify is not None else config.verify
+    start = time.perf_counter()
+    segments: list[tuple[int, bytes]] = []
+    probe = _open_probe(config)
+    try:
+        # The J-Link flash loader expects the reset clock (HSI); reset before
+        # programming, exactly like Ozone/J-Link Commander do.
+        probe.reset(halt=True)
+        if path.lower().endswith(".elf"):
+            from elftools.elf.elffile import ELFFile
+            with open(path, "rb") as fh:
+                elf = ELFFile(fh)
+                for seg in elf.iter_segments():
+                    if seg["p_type"] != "PT_LOAD":
+                        continue
+                    data = seg.data()
+                    if not data:
+                        continue
+                    addr = int(seg["p_paddr"])
+                    segments.append((addr, bytes(data)))
+            if not segments:
+                raise ConfigError(f"{path} has no loadable segments")
+            for addr, data in segments:
+                if 0x08000000 <= addr < 0x08020000:
+                    probe.flash(data, addr)
+                else:
+                    probe.write_memory(addr, data)
+        else:
+            probe.flash_file(path, base or 0)
+        ok = True
+        if verify and segments:
+            for addr, data in segments:
+                back = probe.read_memory(addr, len(data))
+                if bytes(back) != data:
+                    ok = False
+        if run:
+            probe.reset(halt=False)
+            probe.go()
+        else:
+            probe.reset(halt=True)
+        duration = time.perf_counter() - start
+        if args.json:
+            print(json.dumps({"ok": ok, "flash": {"path": path, "duration_s": duration,
+                                                  "verified": ok, "ran_after": bool(run)}}))
+        else:
+            print(f"flashed {path} in {duration:.2f}s")
+            print("verify: OK" if ok else "verify: MISMATCH")
+            print("target: running" if run else "target: halted")
+        return 0 if ok else 1
+    finally:
+        probe.close()
+
+
 def _cmd_flash(args: argparse.Namespace) -> int:
     json_mode = bool(getattr(args, "json", False))
     base = None
@@ -404,6 +477,8 @@ def _cmd_flash(args: argparse.Namespace) -> int:
             base = int(str(args.base), 0)
         except ValueError as exc:
             raise ConfigError(f"invalid --base: {args.base!r}") from exc
+    if not getattr(args, "gdb_flash", False):
+        return _flash_pylink(args, base)
     session = _open_session(args)
     try:
         result = session.flash(args.file, base=base, run=args.run, verify=args.verify)
@@ -854,12 +929,79 @@ def _encode_value(field: ResolvedField, value, probe: JLinkProbe) -> bytes:
     return struct.pack(field.fmt, int(value))
 
 
+_LITERAL_TYPES = {
+    "u8": (1, "<B", "u8", False), "i8": (1, "<b", "i8", True),
+    "u16": (2, "<H", "u16", False), "i16": (2, "<h", "i16", True),
+    "u32": (4, "<I", "u32", False), "i32": (4, "<i", "i32", True),
+    "u64": (8, "<Q", "u64", False), "i64": (8, "<q", "i64", True),
+    "f32": (4, "<f", "f32", False), "f64": (8, "<d", "f64", False),
+    "float": (4, "<f", "f32", False), "double": (8, "<d", "f64", False),
+}
+
+
+def _literal_field(expr: str):
+    """``0x20000000`` / ``0x20000000:f32`` -> ResolvedField (or None)."""
+    m = re.match(r"^(0x[0-9a-fA-F]+|\d+)(?::([A-Za-z0-9_]+))?$", expr.strip())
+    if not m:
+        return None
+    name = (m.group(2) or "u32").lower()
+    spec = _LITERAL_TYPES.get(name)
+    if spec is None:
+        raise ConfigError(f"unknown literal type {name!r}")
+    size, fmt, sampler, signed = spec
+    return ResolvedField(path=expr.strip(), address=int(m.group(1), 0), size=size,
+                         type_name=name, sampler_type=sampler, fmt=fmt, signed=signed)
+
+
+def _cmd_rtt(args: argparse.Namespace) -> int:
+    config = _make_config(args)
+    if not config.device:
+        raise ConfigError("no target device configured")
+    probe = _open_probe(config)
+    data = bytearray()
+    rtt_addr = 0
+    if config.elf:
+        try:
+            rtt_addr = DwarfSymbols(config.elf).variable_address("_SEGGER_RTT")
+        except Exception:
+            rtt_addr = 0
+    try:
+        if not args.no_run:
+            probe.go()
+            time.sleep(0.2)
+        probe.rtt_start(rtt_addr)
+        deadline = time.perf_counter() + args.duration
+        while time.perf_counter() < deadline:
+            chunk = probe.rtt_read(args.channel, 4096)
+            if chunk:
+                data += chunk
+            time.sleep(0.005)
+    finally:
+        probe.rtt_stop()
+        probe.close()
+    if args.out:
+        with open(args.out, "wb") as fh:
+            fh.write(bytes(data))
+    print(bytes(data).decode("utf-8", "replace"), end="")
+    return 0
+
+
 def _cmd_read(args: argparse.Namespace) -> int:
-    config = _read_config(args)
-    dwarf = DwarfSymbols(config.elf)
+    config = _make_config(args)
+    if config.elf is None:
+        discovered = find_elf(None, Path.cwd())
+        if discovered is not None:
+            config.elf = str(discovered)
+    if not config.device:
+        raise ConfigError("no target device configured")
     probe = _open_probe(config)
     try:
-        field = dwarf.resolve_mem(args.expr, probe.read_memory)
+        field = _literal_field(args.expr)
+        if field is None:
+            if not config.elf:
+                raise ConfigError("--elf is required for symbol expressions")
+            dwarf = DwarfSymbols(config.elf)
+            field = dwarf.resolve_mem(args.expr, probe.read_memory)
         data = probe.read_memory(field.read_address, field.read_size)
         value = field.decode(data, 0)
     finally:
@@ -873,11 +1015,21 @@ def _cmd_read(args: argparse.Namespace) -> int:
 
 
 def _cmd_write(args: argparse.Namespace) -> int:
-    config = _read_config(args)
-    dwarf = DwarfSymbols(config.elf)
+    config = _make_config(args)
+    if config.elf is None:
+        discovered = find_elf(None, Path.cwd())
+        if discovered is not None:
+            config.elf = str(discovered)
+    if not config.device:
+        raise ConfigError("no target device configured")
     probe = _open_probe(config)
     try:
-        field = dwarf.resolve_mem(args.expr, probe.read_memory)
+        field = _literal_field(args.expr)
+        if field is None:
+            if not config.elf:
+                raise ConfigError("--elf is required for symbol expressions")
+            dwarf = DwarfSymbols(config.elf)
+            field = dwarf.resolve_mem(args.expr, probe.read_memory)
         value = _parse_value(field, args.value)
         data = _encode_value(field, value, probe)
         probe.write_memory(field.address, data)

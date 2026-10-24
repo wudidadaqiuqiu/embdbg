@@ -212,6 +212,37 @@ class JLinkProbe:
         with self._lock:
             self._require().memory_write(int(address), list(bytes(data)))
 
+    # ------------------------------------------------------------------
+    # RTT (SEGGER Real Time Transfer)
+    # ------------------------------------------------------------------
+    def rtt_start(self, address: int = 0):
+        with self._lock:
+            return self._require().rtt_start(int(address))
+
+    def rtt_read(self, channel: int = 0, size: int = 4096) -> bytes:
+        with self._lock:
+            data = self._require().rtt_read(int(channel), int(size))
+        if not data:
+            return b""
+        return bytes(data) if isinstance(data, (bytes, bytearray, list)) else bytes()
+
+    def rtt_stop(self) -> None:
+        with self._lock:
+            try:
+                self._require().rtt_stop()
+            except Exception:  # pragma: no cover - best effort
+                pass
+
+    def flash(self, data: bytes, address: int) -> None:
+        """Program raw bytes at ``address`` using the J-Link DLL flash loader."""
+        with self._lock:
+            self._require().flash(list(bytes(data)), int(address))
+
+    def flash_file(self, path: str, address: int = 0) -> None:
+        """Program a .bin/.hex/.mot/.srec file through the J-Link DLL."""
+        with self._lock:
+            self._require().flash_file(str(path), int(address))
+
     def read_gdb_register(self, number: int) -> int:
         if number not in GDB_REGISTERS:
             raise TargetError(f"unsupported GDB register {number}")

@@ -647,12 +647,8 @@ class DwarfSymbols:
                              sampler_type=sampler, fmt=fmt, signed=signed,
                              enumerators=enums)
 
-    def resolve_mem(self, expr: str, mem_read=None) -> ResolvedField:
-        """Resolve ``a.b[2].c`` and chained pointers ``a->b->c``.
-
-        ``mem_read(address, length) -> bytes`` is only used for ``->`` (the
-        pointer value is read at runtime).  No target access is done here.
-        """
+    def _resolve_one(self, expr: str, mem_read=None):
+        """Resolve one path (``a.b[2].c`` / ``a->b->c``) -> (field, cu, die)."""
         base, tokens = self._parse_expr(expr)
         var = self._pick_variable(base)
         cu = var.cu
@@ -660,7 +656,7 @@ class DwarfSymbols:
         address = self.variable_address(base)
         path = base
         if not tokens:
-            return self._field_from_type(cu, die, address, path)
+            return self._field_from_type(cu, die, address, path), cu, die
         for idx, (kind, value) in enumerate(tokens):
             last = idx == len(tokens) - 1
             if die is None:
@@ -672,7 +668,7 @@ class DwarfSymbols:
                 address += spec.byte_offset
                 path += "." + str(value)
                 if last:
-                    return self._field_from_spec(cu, spec, address, path)
+                    return self._field_from_spec(cu, spec, address, path), cu, spec.type_die
                 if spec.bit_offset is not None:
                     raise TargetError(f"{path} is a bit-field and has no members")
                 die = self._type(cu, spec.type_die)
@@ -688,7 +684,7 @@ class DwarfSymbols:
                 path += f"[{index}]"
                 die = self._type(cu, element)
                 if last:
-                    return self._field_from_type(cu, die, address, path)
+                    return self._field_from_type(cu, die, address, path), cu, die
             elif kind == "arrow":
                 if die.tag != "DW_TAG_pointer_type":
                     raise TargetError(f"{path} is not a pointer (cannot use ->)")
@@ -706,7 +702,7 @@ class DwarfSymbols:
                 address = target + spec.byte_offset
                 path += "->" + str(value)
                 if last:
-                    return self._field_from_spec(cu, spec, address, path)
+                    return self._field_from_spec(cu, spec, address, path), cu, spec.type_die
                 if spec.bit_offset is not None:
                     raise TargetError(f"{path} is a bit-field and has no members")
                 die = self._type(cu, spec.type_die)
@@ -714,6 +710,33 @@ class DwarfSymbols:
                 raise ConfigError(f"unsupported token {kind!r}")
         # unreachable
         raise TargetError(f"cannot resolve {expr}")
+
+    def resolve_mem(self, expr: str, mem_read=None) -> ResolvedField:
+        """Resolve ``a.b[2].c``, ``a->b->c`` and a leading ``*`` deref.
+
+        ``mem_read(address, length) -> bytes`` is used for ``->`` and ``*``
+        (runtime pointer values); otherwise no target access happens.
+        """
+        text = expr.strip()
+        derefs = 0
+        while text.startswith("*"):
+            derefs += 1
+            text = text[1:].strip()
+        field, cu, die = self._resolve_one(text, mem_read)
+        for _ in range(derefs):
+            die = self._type(cu, die)
+            if die is None or die.tag != "DW_TAG_pointer_type":
+                raise TargetError(f"{field.path} is not a pointer (cannot dereference)")
+            if mem_read is None:
+                raise TargetError(f"*{field.path} needs runtime memory access")
+            raw = mem_read(int(field.address), self._pointer_size)
+            if raw is None or len(raw) < self._pointer_size:
+                raise TargetError(f"short pointer read for {field.path}")
+            target = int.from_bytes(bytes(raw[: self._pointer_size]), "little")
+            pointee = self._type(cu, self._type_ref(cu, die))
+            field = self._field_from_type(cu, pointee, target, "*" + field.path)
+            die = pointee
+        return field
 
     def resolve(self, expr: str) -> ResolvedField:
         var_address, cu, struct_bit, die, path, bitfield = self._walk(expr)
