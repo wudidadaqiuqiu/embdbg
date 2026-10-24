@@ -3,7 +3,7 @@
 # Target / probe
 device = "STM32G431CB"          # J-Link device name (example)
 interface = "SWD"
-speed_khz = 1000
+speed_khz = 4000
 
 # Keep false to stay halted after programming (breakpoints), true for CI.
 run_after_flash = false
