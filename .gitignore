@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# tool temp / captures
+.tmp/
+*.log
+*.csv
+*.bin
+
+# OS
+.DS_Store
+Thumbs.db

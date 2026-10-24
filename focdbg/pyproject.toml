@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "focdbg"
+version = "0.1.0"
+description = "Scriptable J-Link debug backend (JLinkGDBServer + arm-none-eabi-gdb)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+serve = ["pylink-square>=2.0", "pyelftools>=0.29"]
+serial = ["pyserial>=3.5"]
+
+[project.scripts]
+focdbg = "focdbg.cli:main"
+
+[tool.setuptools]
+packages = ["focdbg"]
