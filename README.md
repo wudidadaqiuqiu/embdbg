@@ -263,6 +263,29 @@ serial helper is a plugin; more plugins can be registered.
 
 Details: [docs/symbols.md](docs/symbols.md).
 
+## Using embdbg from a firmware repository
+
+embdbg is a standalone Python package; the firmware-specific use cases belong to
+the firmware repository. Install embdbg editable in that repository's venv and
+keep the cases next to the firmware:
+
+```text
+firmware/
+  tools/foc_cases/           # step / torque / RTT cases (the real example)
+  tools/foc_cases/requirements-dev.txt
+  analysis/                  # captures (gitignored)
+```
+
+```bash
+pip install -e /path/to/tools[serve,serial]
+python tools/foc_cases/position_step.py
+```
+
+The cases call the CLI (`python -m embdbg read/write/hss/rtt`) or the Python API
+(`JLinkProbe`, `DwarfSymbols`, `DebugSession`); `examples/` in this repository
+shows the generic patterns. Keep symbols, serial commands, current limits and
+safety checks in the firmware repository; embdbg stays generic.
+
 ## Tests
 
 ```bash
