@@ -1,5 +1,7 @@
 # embdbg
 
+English | [简体中文](README.zh-CN.md)
+
 A scriptable **J-Link debug backend for embedded targets** (Cortex-M). The CLI is a thin
 layer over `embdbg.DebugSession`; the same API can be reused by a GUI or test scripts.
 
@@ -27,6 +29,13 @@ embdbg.DebugSession ──► Backend (pluggable)
   (breakpoints, stepping, live sampling);
 - **serial** helper and a small plugin system;
 - no LLM, no source parsing: all symbol/type information comes from the ELF/DWARF.
+
+## Documentation
+
+- [Flash: J-Link DLL vs GDB server, reset clock](docs/flash.md)
+- [Symbol resolution: DWARF, pointers, literals](docs/symbols.md)
+- [HSS: field layout and rate](docs/hss.md)
+- [RTT: firmware integration and tool](docs/rtt.md)
 
 ## Install
 
@@ -169,6 +178,9 @@ embdbg hss --expr "g_motor.state.speed" --expr "g_motor.state.iq" \
 - `--no-run` leaves the target halted, `--leave-halted` stops it afterwards;
 - `--no-native` falls back to the host-side sampler.
 
+See [docs/hss.md](docs/hss.md) for field layout, rate selection and block
+coalescing.
+
 ### rtt — SEGGER RTT
 
 Reads an up-channel of the target's SEGGER RTT control block. The `_SEGGER_RTT`
@@ -180,7 +192,8 @@ embdbg rtt --channel 0 --duration 5 --out rtt.bin
 ```
 
 The firmware must call `SEGGER_RTT_Init()` once (see the SEGGER RTT sources and
-the `embdbg_rtt_test` fixture in the FOC project).
+the `embdbg_rtt_test` fixture in the FOC project).  See
+[docs/rtt.md](docs/rtt.md) for the firmware integration and the failure modes.
 
 ### flash
 
@@ -199,6 +212,9 @@ embdbg flash foc.elf --gdb-flash        # slow path, for comparison
 - HEX/MOT/SREC: handled by the J-Link DLL;
 - BIN: `--base` required;
 - `--verify/--no-verify` overrides the config; `--run/--no-run` too.
+
+See [docs/flash.md](docs/flash.md) for the two backends, the reset-clock
+requirement and the ELF segment rules.
 
 ### reset
 
@@ -244,6 +260,8 @@ serial helper is a plugin; more plugins can be registered.
    the core, so `read`/`write`/`hss`/`rtt` are non-intrusive.
 4. **GDB is optional.** It is used by `serve`/`gdbserver`; `read`/`write` do not
    need it and never stop the CPU. No LLM, no C parser: only DWARF.
+
+Details: [docs/symbols.md](docs/symbols.md).
 
 ## Tests
 
