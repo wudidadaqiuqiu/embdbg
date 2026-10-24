@@ -177,7 +177,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar="EXPR",
-        help="DWARF expression, e.g. sys.foc_controller.speed (repeatable)",
+        help="DWARF expression, e.g. g_motor.state.speed (repeatable)",
     )
     p.add_argument(
         "--struct",

@@ -2,7 +2,7 @@
 
 The ELF symbol table only names top-level objects (``sys``, ``ec``, ...).
 High-speed (HSS) observation, however, usually targets a *field* of a
-structure: ``sys.foc_controller.speed``.  That needs type information:
+structure: ``g_motor.state.speed``.  That needs type information:
 
     variable -> struct -> member offset -> member type -> ...
 
@@ -14,8 +14,8 @@ hand-writing ``name:type@offset`` layouts.
 Supported expression syntax::
 
     sys
-    sys.foc_controller
-    sys.foc_controller.angle
+    g_motor.state
+    g_motor.state.angle
     sys.pid_speed.kp
     sys.cfg.enc_lut_a[2]
     sys.fault_status.serious_fault.bit.motor_cfg_err   # bit-field
