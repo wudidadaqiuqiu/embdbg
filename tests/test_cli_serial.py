@@ -5,7 +5,9 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -13,12 +15,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from embdbg.cli import main  # noqa: E402
 
+_CFG = tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False)
+_CFG.write("[embdbg]" + chr(10) + "device = 'STM32G431CB'" + chr(10) + "speed_khz = 4000" + chr(10))
+_CFG.close()
+os.environ["EMBDBG_CONFIG"] = _CFG.name
+
 
 def run_cli(argv):
     out = io.StringIO()
     err = io.StringIO()
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-        code = main(argv)
+        code = main(["--config", _CFG.name] + list(argv))
     return code, out.getvalue(), err.getvalue()
 
 
