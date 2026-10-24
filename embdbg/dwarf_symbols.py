@@ -541,6 +541,15 @@ class DwarfSymbols:
                     raise ConfigError(f"invalid member access in {expr!r}")
                 tokens.append(("member", text[i:j]))
                 i = j
+            elif ch == "-" and i + 1 < len(text) and text[i + 1] == ">":
+                i += 2
+                j = i
+                while j < len(text) and (text[j].isalnum() or text[j] in "_$"):
+                    j += 1
+                if j == i:
+                    raise ConfigError(f"invalid member access in {expr!r}")
+                tokens.append(("arrow", text[i:j]))
+                i = j
             elif ch == "[":
                 j = text.find("]", i)
                 if j < 0:
@@ -603,6 +612,108 @@ class DwarfSymbols:
             else:  # pragma: no cover - parser emits only the above
                 raise ConfigError(f"unsupported token {kind!r}")
         return var_address, cu, struct_bit, die, path, None
+
+    # ------------------------------------------------------------------
+    # pointer-aware resolution (read/write commands)
+    # ------------------------------------------------------------------
+    def _field_from_spec(self, cu, spec, address: int, path: str) -> ResolvedField:
+        sampler, fmt, signed, size, enums = self._scalar(cu, spec.type_die)
+        if spec.bit_offset is not None:
+            return ResolvedField(path=path, address=int(address), size=spec.size,
+                                 type_name=spec.type_name, sampler_type=sampler,
+                                 fmt=fmt, signed=signed, bit_offset=spec.bit_offset,
+                                 bit_size=spec.bit_size, enumerators=enums)
+        return ResolvedField(path=path, address=int(address), size=size,
+                             type_name=spec.type_name, sampler_type=sampler,
+                             fmt=fmt, signed=signed, enumerators=enums)
+
+    def _field_from_type(self, cu, die, address: int, path: str) -> ResolvedField:
+        die = self._type(cu, die)
+        if die is None:
+            raise TargetError(f"cannot resolve {path}")
+        if die.tag == "DW_TAG_pointer_type":
+            size = self._type_size(cu, die) or self._pointer_size
+            fmt = "<Q" if size == 8 else "<I"
+            sampler = "u64" if size == 8 else "u32"
+            return ResolvedField(path=path, address=int(address), size=size,
+                                 type_name=self._type_name(cu, die),
+                                 sampler_type=sampler, fmt=fmt, signed=False)
+        if die.tag in ("DW_TAG_structure_type", "DW_TAG_union_type",
+                       "DW_TAG_array_type"):
+            raise TargetError(f"{path} is an aggregate; read a scalar member instead")
+        sampler, fmt, signed, size, enums = self._scalar(cu, die)
+        return ResolvedField(path=path, address=int(address), size=size,
+                             type_name=self._type_name(cu, die),
+                             sampler_type=sampler, fmt=fmt, signed=signed,
+                             enumerators=enums)
+
+    def resolve_mem(self, expr: str, mem_read=None) -> ResolvedField:
+        """Resolve ``a.b[2].c`` and chained pointers ``a->b->c``.
+
+        ``mem_read(address, length) -> bytes`` is only used for ``->`` (the
+        pointer value is read at runtime).  No target access is done here.
+        """
+        base, tokens = self._parse_expr(expr)
+        var = self._pick_variable(base)
+        cu = var.cu
+        die = self._type(cu, self._type_ref(cu, var.die))
+        address = self.variable_address(base)
+        path = base
+        if not tokens:
+            return self._field_from_type(cu, die, address, path)
+        for idx, (kind, value) in enumerate(tokens):
+            last = idx == len(tokens) - 1
+            if die is None:
+                raise TargetError(f"cannot resolve {path}")
+            if kind == "member":
+                if die.tag not in ("DW_TAG_structure_type", "DW_TAG_union_type"):
+                    raise TargetError(f"{path} is not a structure (cannot access .{value})")
+                spec = self._find_member(cu, die, str(value))
+                address += spec.byte_offset
+                path += "." + str(value)
+                if last:
+                    return self._field_from_spec(cu, spec, address, path)
+                if spec.bit_offset is not None:
+                    raise TargetError(f"{path} is a bit-field and has no members")
+                die = self._type(cu, spec.type_die)
+            elif kind == "index":
+                if die.tag != "DW_TAG_array_type":
+                    raise TargetError(f"{path} is not an array")
+                element = self._type_ref(cu, die)
+                count = self._array_count(cu, die)
+                index = int(value)  # type: ignore[arg-type]
+                if index < 0 or index >= count:
+                    raise TargetError(f"index {index} out of range for {path}[{count}]")
+                address += index * self._type_size(cu, element)
+                path += f"[{index}]"
+                die = self._type(cu, element)
+                if last:
+                    return self._field_from_type(cu, die, address, path)
+            elif kind == "arrow":
+                if die.tag != "DW_TAG_pointer_type":
+                    raise TargetError(f"{path} is not a pointer (cannot use ->)")
+                if mem_read is None:
+                    raise TargetError(f"{path}->{value} needs runtime memory access")
+                raw = mem_read(int(address), self._pointer_size)
+                if raw is None or len(raw) < self._pointer_size:
+                    raise TargetError(f"short pointer read for {path}")
+                target = int.from_bytes(bytes(raw[: self._pointer_size]), "little")
+                pointee = self._type(cu, self._type_ref(cu, die))
+                if pointee is None or pointee.tag not in ("DW_TAG_structure_type",
+                                                          "DW_TAG_union_type"):
+                    raise TargetError(f"{path} does not point to a structure")
+                spec = self._find_member(cu, pointee, str(value))
+                address = target + spec.byte_offset
+                path += "->" + str(value)
+                if last:
+                    return self._field_from_spec(cu, spec, address, path)
+                if spec.bit_offset is not None:
+                    raise TargetError(f"{path} is a bit-field and has no members")
+                die = self._type(cu, spec.type_die)
+            else:  # pragma: no cover
+                raise ConfigError(f"unsupported token {kind!r}")
+        # unreachable
+        raise TargetError(f"cannot resolve {expr}")
 
     def resolve(self, expr: str) -> ResolvedField:
         var_address, cu, struct_bit, die, path, bitfield = self._walk(expr)

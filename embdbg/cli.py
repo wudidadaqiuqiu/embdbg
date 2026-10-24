@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import struct
 import json
 import sys
 import threading
@@ -97,6 +98,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("reset", help="reset the target")
     p.add_argument("--run", action="store_true", help="run instead of staying halted")
+    _add_common(p, suppress=True)
+
+    p = sub.add_parser("read", help="read a variable, field, array element or a->b->c pointer chain")
+    p.add_argument("--expr", required=True, help="e.g. g_state.counter, arr[3], g_a.b->c->v")
+    _add_common(p, suppress=True)
+
+    p = sub.add_parser("write", help="write a variable/field (value is typed by the resolved field)")
+    p.add_argument("--expr", required=True, help="e.g. g_state.counter, g_a.b->c->v")
+    p.add_argument("--value", required=True, help="integer (decimal/0x/0b) or float")
     _add_common(p, suppress=True)
 
     p = sub.add_parser("gdbserver", help="run only the J-Link GDB server (for IDEs / plain gdb)")
@@ -222,6 +232,8 @@ def _dispatch(args: argparse.Namespace) -> int:
         "info": _cmd_info,
         "flash": _cmd_flash,
         "reset": _cmd_reset,
+        "read": _cmd_read,
+        "write": _cmd_write,
         "gdbserver": _cmd_gdbserver,
         "plugins": _cmd_plugins,
         "serial": _cmd_serial,
@@ -786,6 +798,100 @@ def _hss_native(probe, blocks, fields, args, out, start) -> tuple[int, float]:
     if samples > 1 and last_t > 0:
         rate = (samples - 1) / last_t   # HSS timestamps, not host wall time
     return samples, rate
+
+
+def _read_config(args: argparse.Namespace) -> Config:
+    config = _make_config(args)
+    if config.elf is None:
+        discovered = find_elf(None, Path.cwd())
+        if discovered is not None:
+            config.elf = str(discovered)
+    if not config.elf:
+        raise ConfigError("--elf is required (DWARF symbol resolution)")
+    if not config.device:
+        raise ConfigError("no target device configured (pass --device or set device in embdbg.toml)")
+    return config
+
+
+def _open_probe(config: Config) -> JLinkProbe:
+    probe = JLinkProbe(
+        config.device,
+        interface=config.interface,
+        speed_khz=config.speed_khz,
+        serial=config.probe_serial,
+        halt_on_open=False,
+    )
+    probe.open()
+    return probe
+
+
+def _format_value(field: ResolvedField, value: float | int) -> str:
+    if field.sampler_type in ("f32", "f64"):
+        raw = struct.pack(field.fmt, float(value)).hex().upper()
+        return f"{field.path} = {float(value):.6f} (0x{raw}) [{field.sampler_type}]"
+    ival = int(value)
+    if field.bit_offset is not None:
+        return f"{field.path} = {ival} (0x{ival:X}) [{field.sampler_type}, bit {field.bit_offset}:{field.bit_size}]"
+    mask = (1 << (8 * field.size)) - 1
+    return f"{field.path} = {ival} (0x{ival & mask:0{2 * field.size}X}) [{field.sampler_type}]"
+
+
+def _parse_value(field: ResolvedField, text: str):
+    if field.sampler_type in ("f32", "f64"):
+        return float(text)
+    return int(text, 0)
+
+
+def _encode_value(field: ResolvedField, value, probe: JLinkProbe) -> bytes:
+    if field.bit_offset is not None:
+        cur = probe.read_memory(field.address, field.read_size)
+        raw = int.from_bytes(bytes(cur), "little")
+        mask = ((1 << (field.bit_size or 1)) - 1) << field.bit_offset
+        raw = (raw & ~mask) | ((int(value) << field.bit_offset) & mask)
+        return raw.to_bytes(field.read_size, "little")
+    if field.sampler_type in ("f32", "f64"):
+        return struct.pack(field.fmt, float(value))
+    return struct.pack(field.fmt, int(value))
+
+
+def _cmd_read(args: argparse.Namespace) -> int:
+    config = _read_config(args)
+    dwarf = DwarfSymbols(config.elf)
+    probe = _open_probe(config)
+    try:
+        field = dwarf.resolve_mem(args.expr, probe.read_memory)
+        data = probe.read_memory(field.read_address, field.read_size)
+        value = field.decode(data, 0)
+    finally:
+        probe.close()
+    if args.json:
+        print(json.dumps({"expr": field.path, "address": field.address, "value": value,
+                          "type": field.sampler_type, "size": field.read_size}))
+    else:
+        print(_format_value(field, value))
+    return 0
+
+
+def _cmd_write(args: argparse.Namespace) -> int:
+    config = _read_config(args)
+    dwarf = DwarfSymbols(config.elf)
+    probe = _open_probe(config)
+    try:
+        field = dwarf.resolve_mem(args.expr, probe.read_memory)
+        value = _parse_value(field, args.value)
+        data = _encode_value(field, value, probe)
+        probe.write_memory(field.address, data)
+        back = probe.read_memory(field.read_address, field.read_size)
+        readback = field.decode(back, 0)
+    finally:
+        probe.close()
+    ok = abs(float(readback) - float(value)) < 1e-6 if field.sampler_type in ("f32", "f64") else int(readback) == int(value)
+    if args.json:
+        print(json.dumps({"expr": field.path, "address": field.address, "wrote": value,
+                          "readback": readback, "ok": ok, "type": field.sampler_type}))
+    else:
+        print(_format_value(field, readback) + ("  OK" if ok else "  MISMATCH"))
+    return 0 if ok else 1
 
 
 def _cmd_hss(args: argparse.Namespace) -> int:

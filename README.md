@@ -30,8 +30,8 @@ embdbg.DebugSession ──► Backend (pluggable)
 | `plugins` | list plugins |
 | `hss` | high-speed DWARF-aware variable sampling (no halt) |
 
-Symbol/field/pointer aware `read` / `write` and RTT (`rtt`) are being added on
-top of the same DWARF resolver.
+`read` / `write` resolve globals, struct/array members, bit-fields and
+`a->b->c` struct-pointer chains from DWARF (no LLM, no halt).
 
 ## Quick start
 
