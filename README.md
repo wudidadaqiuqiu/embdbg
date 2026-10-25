@@ -46,9 +46,13 @@ pip install "embdbg[serve,serial]"   # pylink-square + pyelftools + pyserial
 
 Requirements:
 
+- **OS: Windows only (currently).** Windows 10/11 x64 is the supported
+  platform; Linux and macOS are not supported yet because the backend drives
+  `JLinkGDBServerCL.exe` / `JLink.exe` and the Windows J-Link DLL.
+- Python ≥ 3.10.
 - GNU Arm toolchain (`arm-none-eabi-gdb`) — GDB backend, `serve`;
 - SEGGER J-Link software (`JLinkGDBServerCL.exe`, `JLink.exe`) — probe access;
-- Python ≥ 3.10.
+- A J-Link probe and the target board.
 
 ## Quick start
 
@@ -313,6 +317,8 @@ value encoder/decoder. It skips when the ELF or the fixture is absent.
 
 ## Status / limitations
 
+- **Windows only (currently)** — Linux/macOS are not supported yet; see
+  Requirements.
 - `read`/`write` resolve statics, struct/array members, bit-fields,
   struct-pointer chains, leading `*` and literal addresses; arbitrary C
   expressions (casts/arithmetic) are not parsed — use `0xADDR:type` or GDB.

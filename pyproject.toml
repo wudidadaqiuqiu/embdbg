@@ -9,6 +9,11 @@ description = "Scriptable J-Link debug backend (JLinkGDBServer + arm-none-eabi-g
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = []
+classifiers = [
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+]
 
 [project.optional-dependencies]
 serve = ["pylink-square>=2.0", "pyelftools>=0.29"]

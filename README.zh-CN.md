@@ -44,11 +44,14 @@ pip install embdbg                   # 基础（GDB 后端）
 pip install "embdbg[serve,serial]"   # pylink-square + pyelftools + pyserial
 ```
 
-依赖：
+环境要求：
 
+- **操作系统：目前只支持 Windows**（Windows 10/11 x64）；Linux/macOS 暂不支持，
+  因为后端直接调用 `JLinkGDBServerCL.exe` / `JLink.exe` 和 Windows 版 J-Link DLL。
+- Python ≥ 3.10；
 - GNU Arm 工具链（`arm-none-eabi-gdb`）——GDB 后端、`serve`；
 - SEGGER J-Link 软件（`JLinkGDBServerCL.exe`、`JLink.exe`）——探针访问；
-- Python ≥ 3.10。
+- 一块 J-Link 探针和目标板。
 
 ## 快速开始
 
@@ -199,6 +202,7 @@ skip。
 
 ## 限制
 
+- **目前只支持 Windows**；Linux/macOS 尚未支持（见“安装/环境要求”）。
 - `read/write` 覆盖静态变量、结构体/数组成员、位域、结构体指针链、前缀 `*`
   和字面地址；任意 C 表达式（cast/算术）不解析——用 `0xADDR:type` 或 GDB；
 - HSS 的指针目标在开始时解析一次，采样过程中指针变化不会重新求值；
