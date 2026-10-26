@@ -821,6 +821,26 @@ def _debug_exec(session: DebugSession, line: str, timeout: float) -> bool:
     return True
 
 
+def _debug_cleanup(session: DebugSession, leave_halted: bool) -> None:
+    """Leave the target in the state the user asked for.
+
+    Breakpoints must go first: a hardware breakpoint survives the session and
+    would immediately re-trap the core if we just resumed (leaving the board
+    stopped at the last breakpoint).  openocd also drops them on disconnect,
+    so clearing here is what makes the intent explicit.
+    """
+    try:
+        for bp in session.list_breakpoints():
+            session.remove_breakpoint(bp.number)
+    except FocdbgError:
+        pass
+    if not leave_halted:
+        try:
+            session.resume()
+        except FocdbgError:
+            pass
+
+
 def _cmd_debug(args: argparse.Namespace) -> int:
     session = _open_session(args)
     timeout = float(getattr(args, "timeout", 30.0) or 30.0)
@@ -847,11 +867,7 @@ def _cmd_debug(args: argparse.Namespace) -> int:
                 break
         return 0
     finally:
-        if not getattr(args, "leave_halted", False):
-            try:
-                session.resume()
-            except FocdbgError:
-                pass
+        _debug_cleanup(session, bool(getattr(args, "leave_halted", False)))
         session.disconnect()
 
 

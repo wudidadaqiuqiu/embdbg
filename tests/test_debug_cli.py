@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from embdbg.cli import _console_text, _debug_exec  # noqa: E402
+from embdbg.cli import _console_text, _debug_cleanup, _debug_exec  # noqa: E402
 from embdbg.errors import GdbTimeoutError  # noqa: E402
 from embdbg.models import (  # noqa: E402
     Breakpoint,
@@ -171,6 +171,20 @@ class TestDebugSession(unittest.TestCase):
 class TestConsoleText(unittest.TestCase):
     def test_strips_prompt_and_blank_lines(self):
         self.assertEqual(_console_text("count = 1\n(gdb)\n\n"), "count = 1")
+
+
+class TestDebugCleanup(unittest.TestCase):
+    """A leftover hardware breakpoint would re-trap the core on resume."""
+
+    def test_breakpoints_are_deleted_before_resuming(self):
+        session = FakeSession()
+        _debug_cleanup(session, leave_halted=False)
+        self.assertEqual(session.calls, [("remove_breakpoint", 1), ("resume",)])
+
+    def test_leave_halted_keeps_the_core_stopped(self):
+        session = FakeSession()
+        _debug_cleanup(session, leave_halted=True)
+        self.assertEqual(session.calls, [("remove_breakpoint", 1)])
 
 
 if __name__ == "__main__":
