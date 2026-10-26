@@ -33,6 +33,16 @@ class Config:
     probe_serial: str | None = None
     elf: str | None = None
 
+    # --- backend selection ---------------------------------------------
+    #: ``jlink-gdb`` (default) or ``openocd-gdb``
+    backend: str = "jlink-gdb"
+    #: openocd executable (auto-discovered when empty)
+    openocd: str | None = None
+    #: board config passed to ``openocd -f`` (e.g. debug/openocd/artpi.cfg)
+    openocd_config: str | None = None
+    #: extra openocd arguments, appended after ``-f <config>``
+    openocd_args: list[str] = field(default_factory=list)
+
     # --- tools ----------------------------------------------------------
     gdb: str | None = None
     jlink_server: str | None = None
@@ -102,14 +112,14 @@ class Config:
             setattr(self, key, value)
 
     def _resolve_relative_paths(self, base: Path) -> None:
-        for key in ("elf", "gdb", "jlink_server", "jlink_exe", "log_dir"):
+        for key in ("elf", "gdb", "jlink_server", "jlink_exe", "log_dir", "openocd", "openocd_config"):
             value = getattr(self, key)
             if not value:
                 continue
             p = Path(os.path.expandvars(str(value))).expanduser()
             if not p.is_absolute():
                 p = base / p
-            setattr(self, key, str(p))
+            setattr(self, key, str(p.resolve()))
 
     def _apply_env(self) -> None:
         mapping = {
@@ -117,6 +127,9 @@ class Config:
             "FOCDBG_INTERFACE": "interface",
             "FOCDBG_SPEED": "speed_khz",
             "FOCDBG_ELF": "elf",
+            "FOCDBG_BACKEND": "backend",
+            "FOCDBG_OPENOCD": "openocd",
+            "FOCDBG_OPENOCD_CONFIG": "openocd_config",
             "FOCDBG_GDB": "gdb",
             "FOCDBG_JLINK_SERVER": "jlink_server",
             "FOCDBG_JLINK_EXE": "jlink_exe",
@@ -139,6 +152,26 @@ class Config:
             raise ConfigError(f"base_port out of range: {self.base_port}")
         if self.elf and not Path(self.elf).expanduser().exists():
             raise ConfigError(f"ELF file not found: {self.elf}")
+
+        key = (self.backend or "").strip().lower().replace("_", "-")
+        if key in ("jlink", "jlinkgdb"):
+            key = "jlink-gdb"
+        elif key in ("openocd", "openocdgdb", "ocd"):
+            key = "openocd-gdb"
+        if key not in ("jlink-gdb", "openocd-gdb"):
+            raise ConfigError(
+                f"unknown backend {self.backend!r} (available: jlink-gdb, openocd-gdb)"
+            )
+        self.backend = key
+        if key == "openocd-gdb" and not self.openocd_config:
+            raise ConfigError(
+                "backend 'openocd-gdb' needs a board config: pass --openocd-config "
+                "debug/openocd/artpi.cfg or set openocd_config in embdbg.toml"
+            )
+
+    @property
+    def is_openocd(self) -> bool:
+        return self.backend == "openocd-gdb"
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)

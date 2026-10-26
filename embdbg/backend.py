@@ -1,9 +1,16 @@
 """Debug backends.
 
 ``Backend`` is the extension point: the CLI and any future GUI talk to a
-``Backend`` only, never to GDB or J-Link directly.  Today there is one concrete
-implementation, :class:`JLinkGdbBackend` (J-Link GDB server + arm-none-eabi-gdb),
-but pyOCD/OpenOCD backends can be added without touching the front-ends.
+``Backend`` only, never to GDB or a probe directly.
+
+Two concrete implementations share one GDB/MI layer (:class:`GdbMiBackend`):
+
+* :class:`JLinkGdbBackend` -- JLinkGDBServerCL + arm-none-eabi-gdb
+* :class:`OpenOcdGdbBackend` -- openocd + arm-none-eabi-gdb
+
+Only the "start a GDB server" and "program the flash" steps differ; everything
+about breakpoints, memory, registers, frames and expressions is identical and
+lives in the shared base class.
 """
 
 from __future__ import annotations
@@ -15,10 +22,12 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from .config import Config
-from .discovery import find_gdb, find_jlink_server
+from .discovery import find_gdb, find_jlink_server, find_openocd
 from .errors import ConfigError, GdbError, ServerError, TargetError
 from .gdbserver import JLinkGDBServer
 from .mi import MIClient, MIRecord
+from .openocd import OpenOcdServer
+from .openocd_probe import OpenOcdProbe
 from .models import (
     Breakpoint,
     ConnectionInfo,
@@ -144,14 +153,21 @@ class Backend(abc.ABC):
     def add_listener(self, kind: str, callback: Callable[[Any], None]) -> None: ...
 
 
-class JLinkGdbBackend(Backend):
-    """J-Link probe -> JLinkGDBServerCL -> GDB/MI -> Python."""
+class GdbMiBackend(Backend):
+    """Probe-specific GDB server -> GDB/MI -> Python.
 
-    name = "jlink-gdb"
+    Subclasses only implement :meth:`_start_server`, :meth:`_validate` and
+    :meth:`_log_file`; the whole MI surface (memory, registers, breakpoints,
+    frames, expressions, stepping) is shared.
+    """
+
+    name = "gdb-mi"
+    #: human-readable server name for error messages
+    server_label = "GDB"
 
     def __init__(self, config: Config):
         self.config = config
-        self.server: JLinkGDBServer | None = None
+        self.server: Any | None = None  # JLinkGDBServer or OpenOcdServer
         self.mi: MIClient | None = None
         self._connection = ConnectionInfo(
             backend=self.name,
@@ -177,44 +193,42 @@ class JLinkGdbBackend(Backend):
         with self._lock:
             if self.mi is not None:
                 return
-            cfg = self.config
-            if not cfg.device:
-                raise ConfigError(
-                    "no target device configured; pass --device STM32G431CB or add "
-                    "`device = \"STM32G431CB\"` to embdbg.toml"
-                )
-            gdb = find_gdb(cfg.gdb)
-            server_exe = find_jlink_server(cfg.jlink_server)
+            self._validate()
+            gdb = find_gdb(self.config.gdb)
             self._connection.gdb_path = str(gdb)
-            self._connection.server_path = str(server_exe)
 
             last_error: Exception | None = None
             for _ in range(2):
-                server = JLinkGDBServer(
-                    server_exe,
-                    device=cfg.device,
-                    interface=cfg.interface,
-                    speed_khz=cfg.speed_khz,
-                    port=None,
-                    base_port=cfg.base_port,
-                    singlerun=cfg.singlerun,
-                    verify=cfg.verify,
-                    probe_serial=cfg.probe_serial,
-                    log_file=self._log_file(),
-                    extra_args=cfg.extra_server_args,
-                    startup_grace=0.3,
-                )
-                server.start()
-                self.server = server
-                self._connection.server_pid = server.pid
-                self._connection.server_port = server.port
+                self._start_server(gdb)
                 try:
                     self._connect_gdb(gdb)
                     return
                 except Exception as exc:  # retry once with a fresh port
                     last_error = exc
                     self._teardown()
-            raise ServerError(f"could not attach GDB to the J-Link server: {last_error}")
+            raise ServerError(
+                f"could not attach GDB to the {self.server_label} server: {last_error}",
+                detail=self.server.output_text() if self.server else None,
+            )
+
+    # ------------------------------------------------------------------
+    # probe-specific hooks
+    # ------------------------------------------------------------------
+    def _validate(self) -> None:
+        """Fail before touching hardware when the config is incomplete."""
+
+    @abc.abstractmethod
+    def _start_server(self, gdb: Path) -> None:
+        """Start the probe's GDB server; must set ``self.server``."""
+
+    @abc.abstractmethod
+    def _log_file(self) -> str | None:
+        """Path for the server log, or None to keep it in memory only."""
+
+    @property
+    def _target_spec(self) -> str:
+        assert self.server is not None
+        return f"127.0.0.1:{self.server.port}"
 
     def _connect_gdb(self, gdb: Path) -> None:
         assert self.server is not None
@@ -235,7 +249,7 @@ class JLinkGdbBackend(Backend):
         self.mi = mi
         self._connection.gdb_pid = mi.pid
 
-        target = f"127.0.0.1:{self.server.port}"
+        target = self._target_spec
         deadline = time.monotonic() + cfg.connect_timeout
         while True:
             started = time.monotonic()
@@ -246,7 +260,7 @@ class JLinkGdbBackend(Backend):
                 elapsed = time.monotonic() - started
                 if not (self.server and self.server.is_alive()):
                     raise ServerError(
-                        f"J-Link GDB server exited while attaching: {exc}",
+                        f"{self.server_label} GDB server exited while attaching: {exc}",
                         detail=self.server.output_text() if self.server else None,
                     ) from exc
                 # Retry only fast failures (connection refused = server not
@@ -254,11 +268,11 @@ class JLinkGdbBackend(Backend):
                 # stuck, and retrying would leave commands in flight.
                 if elapsed > 2.0 or time.monotonic() >= deadline:
                     raise ServerError(
-                        "could not attach GDB to the J-Link GDB server: "
+                        f"could not attach GDB to the {self.server_label} GDB server: "
                         + str(exc)
                         + chr(10)
-                        + "hint: is the probe used by Ozone/J-Flash? power on the board? "
-                        + "re-run with --server-log for the server log",
+                        + "hint: is the probe used by Ozone/J-Flash or another openocd? "
+                        + "power on the board? re-run with --server-log for the server log",
                         detail=self.server.output_text() if self.server else None,
                     ) from exc
                 time.sleep(0.2)
@@ -320,7 +334,8 @@ class JLinkGdbBackend(Backend):
             except (GdbError, TargetError):
                 break
 
-    def _log_file(self) -> str | None:
+    def _log_dir(self) -> Path | None:
+        """Directory for server logs, or None when logging is disabled."""
         cfg = self.config
         if not (cfg.log_dir or cfg.keep_server_log):
             return None
@@ -331,7 +346,7 @@ class JLinkGdbBackend(Backend):
 
             directory = Path(tempfile.mkdtemp(prefix="embdbg-"))
         directory.mkdir(parents=True, exist_ok=True)
-        return str(directory / f"jlink-gdbserver-{int(time.time())}.log")
+        return directory
 
     # ------------------------------------------------------------------
     # properties
@@ -714,6 +729,159 @@ class JLinkGdbBackend(Backend):
         return info
 
 
+class JLinkGdbBackend(GdbMiBackend):
+    """J-Link probe -> JLinkGDBServerCL -> GDB/MI -> Python."""
+
+    name = "jlink-gdb"
+    server_label = "J-Link"
+
+    def _validate(self) -> None:
+        if not self.config.device:
+            raise ConfigError(
+                "no target device configured; pass --device STM32G431CB or add "
+                '`device = "STM32G431CB"` to embdbg.toml'
+            )
+
+    def _start_server(self, gdb: Path) -> None:
+        cfg = self.config
+        server_exe = find_jlink_server(cfg.jlink_server)
+        self._connection.server_path = str(server_exe)
+        server = JLinkGDBServer(
+            server_exe,
+            device=cfg.device or "",
+            interface=cfg.interface,
+            speed_khz=cfg.speed_khz,
+            port=None,
+            base_port=cfg.base_port,
+            singlerun=cfg.singlerun,
+            verify=cfg.verify,
+            probe_serial=cfg.probe_serial,
+            log_file=self._log_file(),
+            extra_args=cfg.extra_server_args,
+            startup_grace=0.3,
+        )
+        server.start()
+        self.server = server
+        self._connection.server_pid = server.pid
+        self._connection.server_port = server.port
+
+    def _log_file(self) -> str | None:
+        directory = self._log_dir()
+        return None if directory is None else str(directory / f"jlink-gdbserver-{int(time.time())}.log")
+
+
+class OpenOcdGdbBackend(GdbMiBackend):
+    """``openocd`` -> GDB/MI -> Python.
+
+    OpenOCD is probe-agnostic: whatever ``-f <config>`` declares (ST-Link,
+    CMSIS-DAP, J-Link, ...) is what gets used, so this backend needs no device
+    string -- only a config file.
+    """
+
+    name = "openocd-gdb"
+    server_label = "OpenOCD"
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        self._openocd_exe: str | None = None
+
+    def _validate(self) -> None:
+        if not self.config.openocd_config:
+            raise ConfigError(
+                "no OpenOCD config configured; pass --openocd-config debug/openocd/artpi.cfg "
+                'or add `openocd_config = "debug/openocd/artpi.cfg"` to embdbg.toml'
+            )
+
+    def _start_server(self, gdb: Path) -> None:
+        cfg = self.config
+        exe = find_openocd(cfg.openocd)
+        self._openocd_exe = str(exe)
+        self._connection.server_path = str(exe)
+        server = OpenOcdServer(
+            exe,
+            cfg.openocd_config or "",
+            speed_khz=cfg.speed_khz or None,
+            base_port=cfg.base_port,
+            extra_args=cfg.openocd_args,
+        )
+        server.start()
+        self.server = server
+        self._connection.server_pid = server.pid
+        self._connection.server_port = server.port
+
+    def _log_file(self) -> str | None:
+        # openocd's log goes to stdout, which the server keeps in memory
+        return None
+
+    @property
+    def tcl_port(self) -> int | None:
+        return getattr(self.server, "tcl_port", None)
+
+    def probe(self) -> OpenOcdProbe:
+        """TCL probe attached to the running openocd (non-intrusive access)."""
+        if self.server is None or self._openocd_exe is None:
+            raise TargetError("not connected to a target")
+        probe = OpenOcdProbe(
+            self._openocd_exe,
+            self.config.openocd_config or "",
+            tcl_port=self.server.tcl_port,
+        )
+        return probe.open()
+
+    def target_info(self) -> TargetInfo:
+        info = super().target_info()
+        # `device` is a J-Link concept; the openocd config names the target.
+        info.device = None
+        return info
+
+    def flash(
+        self,
+        path: str,
+        *,
+        base: int | None = None,
+        run: bool | None = None,
+        verify: bool | None = None,
+        progress: Callable[[dict], None] | None = None,
+    ) -> FlashResult:
+        """Program through OpenOCD's flash driver (``flash write_image``).
+
+        GDB's ``-target-download`` works too, but it goes through the remote
+        protocol in 1 KiB chunks; ``flash write_image`` uses the probe-side
+        driver and is roughly an order of magnitude faster on QSPI.
+        """
+        cfg = self.config
+        run = cfg.run_after_flash if run is None else run
+        verify = cfg.verify if verify is None else verify
+        if self.server is None:
+            raise TargetError("not connected to a target")
+
+        started = time.monotonic()
+        probe = self.probe()
+        try:
+            written = probe.flash_file(path, base, verify=bool(verify))
+        finally:
+            probe.close()
+        duration = time.monotonic() - started
+
+        # flash_file() resets and halts the core behind GDB's back; tell GDB
+        # about the new state so later commands do not operate on stale data.
+        if self.mi is not None:
+            try:
+                self.mi.drain_stops()
+                self.mi.execute_console("monitor reset halt")
+                if run:
+                    self.mi.execute("-exec-continue")
+            except (GdbError, ServerError):  # best effort
+                pass
+        return FlashResult(
+            path=str(path),
+            duration_s=duration,
+            bytes_downloaded=written,
+            verified=True if verify else None,
+            ran_after=bool(run),
+        )
+
+
 # ----------------------------------------------------------------------
 def _int(value: Any) -> int | None:
     if value is None:
@@ -740,6 +908,16 @@ def _breakpoint_from_dict(raw: dict) -> Breakpoint:
 
 def create_backend(name: str, config: Config) -> Backend:
     """Backend factory; add new names here as they are implemented."""
-    if name in ("jlink", "jlink-gdb", "jlink_gdb"):
+    key = (name or "").strip().lower().replace("_", "-")
+    if key in ("jlink", "jlink-gdb", "jlinkgdb"):
         return JLinkGdbBackend(config)
-    raise ConfigError(f"unknown backend {name!r} (available: jlink-gdb)")
+    if key in ("openocd", "openocd-gdb", "openocdgdb", "ocd"):
+        return OpenOcdGdbBackend(config)
+    raise ConfigError(
+        f"unknown backend {name!r} (available: jlink-gdb, openocd-gdb)"
+    )
+
+
+def backend_for(config: Config) -> Backend:
+    """Build the backend named in ``config.backend``."""
+    return create_backend(config.backend, config)

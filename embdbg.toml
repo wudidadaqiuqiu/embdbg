@@ -1,21 +1,36 @@
 [embdbg]
 # ---- example configuration; copy to your firmware repository ----
-# Target / probe
-device = "STM32G431CB"          # J-Link device name (example)
+# Everything here is optional.  This file ships with the tool, so it is also
+# the fallback when no embdbg.toml is found in the project tree -- keep it
+# harmless (no absolute paths, no `elf` pointing at a file that only exists in
+# some other checkout).
+
+# ---- backend ---------------------------------------------------------
+# jlink-gdb  : J-Link probe  -> JLinkGDBServerCL -> arm-none-eabi-gdb
+# openocd-gdb: any openocd-supported probe (ST-Link, CMSIS-DAP, ...) -> openocd
+#backend = "jlink-gdb"
+#openocd = "C:/path/to/openocd.exe"                 # auto-discovered when empty
+#openocd_config = "debug/openocd/artpi.cfg"         # board config for `openocd -f`
+#openocd_args = []                                  # extra arguments for openocd
+
+# ---- target / probe (J-Link) -----------------------------------------
+#device = "STM32G431CB"         # ignored by the openocd backend
 interface = "SWD"
 speed_khz = 4000
 
 # Keep false to stay halted after programming (breakpoints), true for CI.
 run_after_flash = false
 
-# ELF with DWARF: used for symbols/fields/pointers. Relative paths resolve
-# from the process working directory.
-elf = "build/Debug/firmware.elf"
+# ELF with DWARF: used for symbols/fields/pointers.  Leave it out here; set it
+# per project (or pass --elf), otherwise every command fails when the file is
+# missing.
+#elf = "build/Debug/firmware.elf"
 
-# Toolchain (leave empty for auto-discovery)
+# ---- toolchain (leave empty for auto-discovery) ----------------------
 # gdb = "C:/path/to/arm-none-eabi-gdb.exe"
 # jlink_server = "C:/Program Files/SEGGER/JLink/JLinkGDBServerCL.exe"
+# jlink_exe = "C:/Program Files/SEGGER/JLink/JLink.exe"
 
-# Behaviour
+# ---- behaviour -------------------------------------------------------
 singlerun = true
 verify = true

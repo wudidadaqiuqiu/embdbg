@@ -23,6 +23,7 @@ embdbg.DebugSession ──► Backend (pluggable)
 - **read / write** symbols with fields, arrays, bit-fields and chained struct pointers
   (`g_state.counter`, `cfg.tbl[3]`, `a->b->c`, `*p`, `0x20000208:float`);
 - **HSS** high-speed sampling of DWARF fields or whole structs (no halt);
+- **debug** interactive session: breakpoints, stepping, backtrace, locals, registers;
 - **RTT** up-channel read (SEGGER Real Time Transfer);
 - **flash** with the J-Link DLL (fast, like Ozone) or the GDB-server path;
 - **serve / gdbserver** GDB RSP server for Ozone or plain `arm-none-eabi-gdb`
@@ -32,6 +33,7 @@ embdbg.DebugSession ──► Backend (pluggable)
 
 ## Documentation
 
+- [Backends: J-Link and OpenOCD (ST-Link / CMSIS-DAP)](docs/openocd.md)
 - [Flash: J-Link DLL vs GDB server, reset clock](docs/flash.md)
 - [Symbol resolution: DWARF, pointers, literals](docs/symbols.md)
 - [HSS: field layout and rate](docs/hss.md)
@@ -47,12 +49,14 @@ pip install "embdbg[serve,serial]"   # pylink-square + pyelftools + pyserial
 Requirements:
 
 - **OS: Windows only (currently).** Windows 10/11 x64 is the supported
-  platform; Linux and macOS are not supported yet because the backend drives
-  `JLinkGDBServerCL.exe` / `JLink.exe` and the Windows J-Link DLL.
+  platform; Linux and macOS are not supported yet because the J-Link backend
+  drives `JLinkGDBServerCL.exe` / `JLink.exe` and the Windows J-Link DLL.
 - Python ≥ 3.10.
-- GNU Arm toolchain (`arm-none-eabi-gdb`) — GDB backend, `serve`;
-- SEGGER J-Link software (`JLinkGDBServerCL.exe`, `JLink.exe`) — probe access;
-- A J-Link probe and the target board.
+- GNU Arm toolchain (`arm-none-eabi-gdb`).
+- **J-Link backend:** SEGGER J-Link software + a J-Link probe.
+- **OpenOCD backend:** `openocd` (e.g.
+  `winget install xpack-dev-tools.openocd-xpack`) + any probe its board config
+  supports — no J-Link hardware needed.
 
 ## Quick start
 
@@ -84,7 +88,14 @@ Every option can be overridden on the command line.
 
 ```toml
 [embdbg]
+backend = "jlink-gdb"            # jlink-gdb | openocd-gdb
+
+# J-Link backend
 device = "STM32G431CB"           # J-Link device name
+# OpenOCD backend (no device needed)
+# openocd_config = "debug/openocd/artpi.cfg"
+# openocd = "C:/path/to/openocd.exe"
+
 interface = "SWD"                # SWD | JTAG
 speed_khz = 4000
 
@@ -106,10 +117,13 @@ Common flags (available on most subcommands):
 | flag | meaning |
 |---|---|
 | `--config PATH` | config file |
+| `--backend NAME` | `jlink-gdb` (default) or `openocd-gdb` |
 | `--device NAME` | J-Link device name |
 | `--interface SWD\|JTAG` | debug interface |
 | `--speed KHZ` | SWD/JTAG clock |
 | `--elf PATH` | ELF with DWARF information |
+| `--openocd PATH` | openocd executable (OpenOCD backend) |
+| `--openocd-config PATH` | board config for `openocd -f` (OpenOCD backend) |
 | `--probe-serial SN` | select a J-Link by serial |
 | `--json` | machine-readable output |
 | `-v/--verbose` | diagnostics |
@@ -124,11 +138,15 @@ embdbg doctor            # toolchain, config, ELF, probe
 embdbg info [--json]     # connect, print target/register/session info
 ```
 
+With `backend = "openocd-gdb"`, `probes` and `doctor` run
+`openocd -f <config> -c "init; shutdown"` and report the adapter openocd found
+(`STLINK V2J48M35 (API v2) ...`) instead of asking `JLink.exe`.
+
 ### read / write
 
-Resolve an expression against the ELF DWARF, then read/write through the J-Link
-DLL. **Symbol reads do not halt the core**; pointer targets are fetched through
-the DLL.
+Resolve an expression against the ELF DWARF, then read/write through the probe
+(the J-Link DLL, or openocd's TCL port). **Symbol reads do not halt the core**;
+pointer targets are fetched the same way.
 
 Expression forms:
 
@@ -227,10 +245,41 @@ embdbg reset          # reset, leave halted
 embdbg reset --run    # reset and run
 ```
 
+### debug — breakpoints, stepping, variables
+
+An interactive session (one process holds the GDB/MI connection, because
+OpenOCD drops breakpoints when GDB disconnects):
+
+```bash
+embdbg debug                                  # REPL
+embdbg debug -c "break rt_pin_write" -c run -c bt -c "frame 1" -c locals -c quit
+```
+
+```text
+(embdbg) break rt_pin_write
+1	rt_pin_write (pin.c:145)
+(embdbg) run
+breakpoint 1: rt_pin_write at pin.c:145
+  at rt_pin_write at pin.c:145
+(embdbg) bt
+#0   rt_pin_write at pin.c:145
+#1   main at main.c:26
+(embdbg) frame 1
+(embdbg) locals
+count = 505
+(embdbg) print rt_tick
+rt_tick = 504001
+```
+
+Commands: `break|b`, `bps`, `delete|d`, `run|continue|c`, `step|s`, `next|n`,
+`si`, `bt`, `frame|f`, `locals`, `args`, `print|p`, `regs`, `halt`, `info`,
+`gdb <raw command>`, `help`, `quit`. Works with both backends; breakpoints are
+hardware (`hw_breakpoints = true`) because the code runs from flash.
+
 ### serve / gdbserver — breakpoint debugging
 
-`serve` owns the probe and exposes a GDB RSP server (Ozone-style) plus optional
-live sampling. `gdbserver` runs only the SEGGER GDB server.
+On J-Link, `serve` owns the probe and exposes a GDB RSP server (Ozone-style)
+plus optional live sampling; `gdbserver` runs only the SEGGER GDB server.
 
 ```bash
 embdbg serve --port 2331                    # connect Ozone / gdb
@@ -240,6 +289,16 @@ embdbg gdbserver --port 2331 --timeout 60   # server only
 Start Ozone or `arm-none-eabi-gdb` with `target extended-remote 127.0.0.1:2331`.
 The GDB server and the DLL-based commands are mutually exclusive: stop the
 server before running `read`/`hss`/`rtt`/`flash`.
+
+With `backend = "openocd-gdb"` the same commands start **openocd** instead
+(no RSP proxy is needed — openocd serves GDB natively) and keep sampling on the
+TCL port, so a debugger and `--sample` can run at the same time:
+
+```bash
+embdbg serve --sample rt_tick --sample-size 4 --rate 20 --sample-out ticks.csv
+# openocd pid 1234: gdb 127.0.0.1:2331, tcl 2332
+#   arm-none-eabi-gdb "<elf>" -ex "target extended-remote 127.0.0.1:2331"
+```
 
 ### serial / plugins
 
@@ -326,3 +385,7 @@ value encoder/decoder. It skips when the ELF or the fixture is absent.
   capture the address is not re-evaluated.
 - The J-Link DLL is the fast path; the GDB-server flash path is kept for
   comparison/debugging only.
+- **OpenOCD backend:** `read`/`write`/`hss` go over TCL and still do not halt
+  the core, but `rtt`, `serve` and `gdbserver` are unavailable (RTT and the RSP
+  proxy are built on the J-Link DLL), and `hss` falls back to host-side
+  sampling (`--no-native`). See [docs/openocd.md](docs/openocd.md).

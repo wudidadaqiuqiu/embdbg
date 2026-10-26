@@ -22,14 +22,32 @@ from typing import Any
 
 from . import __version__
 from .config import Config
-from .discovery import find_elf, find_gdb, find_jlink_exe, find_jlink_server, gdb_version, list_probes
-from .errors import ConfigError, FocdbgError, TargetError, ToolNotFoundError
+from .discovery import (
+    find_elf,
+    find_gdb,
+    find_jlink_exe,
+    find_jlink_server,
+    find_openocd,
+    gdb_version,
+    list_probes,
+    openocd_version,
+)
+from .errors import (
+    ConfigError,
+    FocdbgError,
+    GdbTimeoutError,
+    ServerError,
+    TargetError,
+    ToolNotFoundError,
+)
 from .dwarf_symbols import DwarfSymbols, ResolvedField
 from .elf_symbols import ElfSymbols
 from .gdbserver import JLinkGDBServer
 from .jlink_probe import JLinkProbe
+from .openocd import OpenOcdServer
+from .openocd_probe import OpenOcdProbe
 from .rsp import RspServer
-from .models import to_dict
+from .models import ProbeInfo, to_dict
 from .plugin_cli import add_serial_options, cmd_plugins, cmd_serial
 from .plugins.base import PluginContext, PluginManager
 from .sampler import Sampler, csv_header, decode_fields, fields_size, format_sample, parse_fields
@@ -37,6 +55,7 @@ from .session import DebugSession
 from .util import find_free_ports, hexdump
 
 _OVERRIDE_KEYS = (
+    "backend",
     "device",
     "interface",
     "speed_khz",
@@ -44,6 +63,8 @@ _OVERRIDE_KEYS = (
     "gdb",
     "jlink_server",
     "jlink_exe",
+    "openocd",
+    "openocd_config",
     "base_port",
     "probe_serial",
 )
@@ -56,6 +77,12 @@ def _add_common(parser: argparse.ArgumentParser, *, suppress: bool = False) -> N
     default = argparse.SUPPRESS if suppress else None
     flag_default = argparse.SUPPRESS if suppress else False
     parser.add_argument("--config", default=default, help="path to embdbg.toml")
+    parser.add_argument(
+        "--backend",
+        default=default,
+        choices=("jlink-gdb", "openocd-gdb"),
+        help="debug backend (default: jlink-gdb)",
+    )
     parser.add_argument("--device", default=default, help="target device (e.g. STM32G431CB)")
     parser.add_argument("--interface", default=default, choices=("SWD", "JTAG"), help="debug interface")
     parser.add_argument("--speed", dest="speed_khz", type=int, default=default, help="interface speed in kHz")
@@ -63,6 +90,12 @@ def _add_common(parser: argparse.ArgumentParser, *, suppress: bool = False) -> N
     parser.add_argument("--gdb", default=default, help="path to arm-none-eabi-gdb")
     parser.add_argument("--jlink-server", default=default, help="path to JLinkGDBServerCL")
     parser.add_argument("--jlink-exe", default=default, help="path to JLink.exe")
+    parser.add_argument("--openocd", default=default, help="path to openocd")
+    parser.add_argument(
+        "--openocd-config",
+        default=default,
+        help="board config for openocd -f (e.g. debug/openocd/artpi.cfg)",
+    )
     parser.add_argument("--base-port", type=int, default=default, help="first TCP port to try")
     parser.add_argument("--probe-serial", default=default, help="select a J-Link by serial number")
     parser.add_argument("--json", action="store_true", default=flag_default, help="machine-readable output")
@@ -121,6 +154,23 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("gdbserver", help="run only the J-Link GDB server (for IDEs / plain gdb)")
     p.add_argument("--port", type=int, default=None, help="explicit TCP port")
     p.add_argument("--timeout", type=float, default=None, help="seconds to wait for a client")
+    _add_common(p, suppress=True)
+
+    p = sub.add_parser(
+        "debug",
+        help="interactive debug session: break/run/step/bt/locals/print/regs",
+    )
+    p.add_argument(
+        "-c",
+        "--command",
+        dest="debug_cmd",
+        action="append",
+        default=[],
+        metavar="CMD",
+        help="run CMD inside the session and exit (repeatable, scriptable)",
+    )
+    p.add_argument("--timeout", type=float, default=30.0, help="seconds to wait for a stop (default 30)")
+    p.add_argument("--leave-halted", action="store_true", help="keep the target halted on exit")
     _add_common(p, suppress=True)
 
     p = sub.add_parser("plugins", help="list available and configured plugins")
@@ -244,6 +294,7 @@ def _dispatch(args: argparse.Namespace) -> int:
         "rtt": _cmd_rtt,
         "read": _cmd_read,
         "write": _cmd_write,
+        "debug": _cmd_debug,
         "gdbserver": _cmd_gdbserver,
         "plugins": _cmd_plugins,
         "serial": _cmd_serial,
@@ -261,7 +312,14 @@ def _make_config(args: argparse.Namespace) -> Config:
     overrides = {key: getattr(args, key) for key in _OVERRIDE_KEYS if hasattr(args, key)}
     if getattr(args, "server_log", False):
         overrides["keep_server_log"] = True
-    return Config.load(getattr(args, "config", None), overrides)
+    config = Config.load(getattr(args, "config", None), overrides)
+    if config.elf is None:
+        # One place for symbol discovery: every command that needs DWARF
+        # (read/write/hss/serve --sample/debug) then works without --elf.
+        discovered = find_elf(None, Path.cwd())
+        if discovered is not None:
+            config.elf = str(discovered)
+    return config
 
 
 def _open_session(args: argparse.Namespace) -> DebugSession:
@@ -320,9 +378,22 @@ def _report_error(exc: FocdbgError, json_mode: bool) -> None:
 # ----------------------------------------------------------------------
 def _cmd_probes(args: argparse.Namespace) -> int:
     config = _make_config(args)
+    json_mode = bool(getattr(args, "json", False))
+    if config.is_openocd:
+        probes, detail = _openocd_scan(config)
+        if json_mode:
+            print(json.dumps({"ok": True, "backend": config.backend,
+                              "probes": to_dict(probes), "detail": detail}))
+        else:
+            for probe in probes:
+                print(f"#{probe.index}  {probe.product}  ({probe.connection})")
+            if not probes:
+                print("no probe reported by openocd")
+            print(f"openocd: {detail}")
+        return 0
+
     jlink = find_jlink_exe(config.jlink_exe)
     probes = list_probes(jlink)
-    json_mode = bool(getattr(args, "json", False))
     if json_mode:
         print(json.dumps({"ok": True, "probes": to_dict(probes)}))
     else:
@@ -331,6 +402,51 @@ def _cmd_probes(args: argparse.Namespace) -> int:
         for probe in probes:
             print(f"#{probe.index}  S/N {probe.serial}  {probe.product}  ({probe.connection})")
     return 0
+
+
+_OCD_ADAPTER_RE = re.compile(
+    r"Info\s*:\s*((?:STLINK|ST-Link|CMSIS-DAP|J-Link|FTDI|J-Link OB)[^\r\n]*)", re.I
+)
+_OCD_FAULT_RE = re.compile(r"^(Error|Error:)[^\r\n]*", re.M)
+
+
+def _openocd_scan(config: Config, timeout: float = 25.0) -> tuple[list, str]:
+    """Ask openocd to connect once (``init; shutdown``) and parse the adapter.
+
+    This is the OpenOCD equivalent of ``JLink.exe ShowEmuList``: a probe check
+    that does not program anything and leaves the target running.
+    """
+    import subprocess
+
+    exe = find_openocd(config.openocd)
+    if not config.openocd_config:
+        raise ConfigError("--openocd-config is required with the openocd backend")
+    try:
+        proc = subprocess.run(
+            [str(exe), "-f", str(config.openocd_config), "-c", "init; shutdown"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ToolNotFoundError(f"openocd ({exe})", str(exc)) from exc
+    text = (proc.stdout or "") + (proc.stderr or "")
+    match = _OCD_ADAPTER_RE.search(text)
+    probes = []
+    if match:
+        probes.append(
+            ProbeInfo(index=0, serial="", product=match.group(1).strip(), connection="OpenOCD")
+        )
+    if not probes:
+        fault = _OCD_FAULT_RE.search(text)
+        reason = fault.group(0).strip() if fault else "openocd found no usable probe"
+        raise ServerError(
+            f"openocd could not open the probe declared by {config.openocd_config}: {reason}",
+            detail=text[-1500:],
+        )
+    return probes, str(exe)
 
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
@@ -349,25 +465,54 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         record("gdb", True, f"{gdb} [{gdb_version(gdb) or 'version unknown'}]")
     except FocdbgError as exc:
         record("gdb", False, str(exc))
-    try:
-        server = find_jlink_server(config.jlink_server)
-        record("jlink_server", True, str(server))
-    except FocdbgError as exc:
-        record("jlink_server", False, str(exc))
-    try:
-        exe = find_jlink_exe(config.jlink_exe)
-        probes = list_probes(exe)
-        detail = f"{exe}; {len(probes)} probe(s)"
-        if probes:
-            detail += " -> " + ", ".join(f"S/N {p.serial}" for p in probes)
-        record("jlink_probe", bool(probes), detail)
-    except FocdbgError as exc:
-        record("jlink_probe", False, str(exc))
+
+    if config.is_openocd:
+        try:
+            exe = find_openocd(config.openocd)
+            record("openocd", True, f"{exe} [{openocd_version(exe) or 'version unknown'}]")
+        except FocdbgError as exc:
+            record("openocd", False, str(exc))
+        cfg_path = config.openocd_config
+        record(
+            "openocd_config",
+            bool(cfg_path and Path(cfg_path).is_file()),
+            cfg_path or "not configured (pass --openocd-config)",
+        )
+        if cfg_path and Path(cfg_path).is_file():
+            try:
+                probes, detail = _openocd_scan(config)
+                record("probe", True, f"{detail}; {probes[0].product}")
+            except FocdbgError as exc:
+                record("probe", False, str(exc))
+    else:
+        try:
+            server = find_jlink_server(config.jlink_server)
+            record("jlink_server", True, str(server))
+        except FocdbgError as exc:
+            record("jlink_server", False, str(exc))
+        try:
+            exe = find_jlink_exe(config.jlink_exe)
+            probes = list_probes(exe)
+            detail = f"{exe}; {len(probes)} probe(s)"
+            if probes:
+                detail += " -> " + ", ".join(f"S/N {p.serial}" for p in probes)
+            record("jlink_probe", bool(probes), detail)
+        except FocdbgError as exc:
+            record("jlink_probe", False, str(exc))
 
     discovered = find_elf(None, Path.cwd())
     elf = config.elf or (str(discovered) if discovered else None)
     record("elf", bool(elf and Path(elf).is_file()), elf or "not found (pass --elf)")
-    record("device", bool(config.device), config.device or "not configured (pass --device)")
+    if config.is_openocd:
+        detail = (
+            "ignored (the openocd config names the target)"
+            if config.device
+            else "not needed (the openocd config names the target)"
+        )
+        record("device", True, detail)
+    else:
+        record("device", bool(config.device), config.device or "not configured (pass --device)")
+    record("backend", True, config.backend)
     record("config", True, config.config_path or "defaults + environment")
 
     if json_mode:
@@ -390,7 +535,10 @@ def _cmd_info(args: argparse.Namespace) -> int:
             print(json.dumps({"ok": True, "target": to_dict(info), "connection": to_dict(conn)}))
         else:
             print(f"backend:    {conn.backend}")
-            print(f"target:     {info.device} via {info.interface} @ {info.speed_khz} kHz")
+            if info.device:
+                print(f"target:     {info.device} via {info.interface} @ {info.speed_khz} kHz")
+            else:
+                print(f"target:     (from the openocd config) via {info.interface} @ {info.speed_khz} kHz")
             print(f"state:      {info.state}")
             print(f"pc:         {to_hex(info.pc)}")
             print(f"voltage:    {info.voltage if info.voltage is not None else '-'} V")
@@ -406,17 +554,19 @@ def to_hex(value: int | None) -> str:
     return f"0x{value:08x}" if value is not None else "-"
 
 
-def _flash_pylink(args: argparse.Namespace, base) -> int:
+def _flash_probe(args: argparse.Namespace, base) -> int:
     config = _make_config(args)
     if config.elf is None:
         discovered = find_elf(None, Path.cwd())
         if discovered is not None:
             config.elf = str(discovered)
-    if not config.device:
-        raise ConfigError("no target device configured")
     path = args.file
     run = args.run if args.run is not None else config.run_after_flash
     verify = args.verify if args.verify is not None else config.verify
+    if config.is_openocd:
+        return _flash_openocd(config, path, base, run=run, verify=verify, json_mode=bool(args.json))
+    if not config.device:
+        raise ConfigError("no target device configured")
     start = time.perf_counter()
     segments: list[tuple[int, bytes]] = []
     probe = _open_probe(config)
@@ -469,6 +619,28 @@ def _flash_pylink(args: argparse.Namespace, base) -> int:
         probe.close()
 
 
+def _flash_openocd(config: Config, path: str, base, *, run: bool, verify: bool, json_mode: bool) -> int:
+    """Program through ``openocd``'s flash driver (``flash write_image``)."""
+    probe = _open_probe(config)
+    try:
+        started = time.perf_counter()
+        written = probe.flash_file(path, base, verify=bool(verify))
+        duration = time.perf_counter() - started
+        if run:
+            probe.reset(halt=False)
+    finally:
+        probe.close()
+    if json_mode:
+        print(json.dumps({"ok": True, "flash": {"path": path, "duration_s": duration,
+                                                "bytes": written, "verified": bool(verify),
+                                                "ran_after": bool(run), "backend": config.backend}}))
+    else:
+        print(f"flashed {path} in {duration:.2f}s ({written} bytes, openocd)")
+        print("verify: OK" if verify else "verify: skipped")
+        print("target: running" if run else "target: halted")
+    return 0
+
+
 def _cmd_flash(args: argparse.Namespace) -> int:
     json_mode = bool(getattr(args, "json", False))
     base = None
@@ -478,7 +650,7 @@ def _cmd_flash(args: argparse.Namespace) -> int:
         except ValueError as exc:
             raise ConfigError(f"invalid --base: {args.base!r}") from exc
     if not getattr(args, "gdb_flash", False):
-        return _flash_pylink(args, base)
+        return _flash_probe(args, base)
     session = _open_session(args)
     try:
         result = session.flash(args.file, base=base, run=args.run, verify=args.verify)
@@ -513,9 +685,183 @@ def _cmd_reset(args: argparse.Namespace) -> int:
     return 0
 
 
+# ----------------------------------------------------------------------
+# interactive debug session (breakpoints / stepping / inspection)
+# ----------------------------------------------------------------------
+_DEBUG_HELP = """\
+commands:
+  break|b LOC        set a hardware breakpoint (symbol, file:line or 0xADDR)
+  bps                list breakpoints
+  delete|d [N]       delete breakpoint N (without a number: delete all)
+  run|continue|c     resume and wait for a stop
+  step|s [N]         step into (N times)
+  next|n [N]         step over (N times)
+  si [N]             step one instruction
+  bt [N]             backtrace
+  frame|f N          select frame N
+  locals / args      info locals / info args of the selected frame
+  print|p EXPR       evaluate an expression
+  regs [NAME...]     read registers
+  halt               halt the core
+  info               target info
+  gdb CMD            raw GDB CLI command
+  help / quit
+"""
+
+
+def _console_text(text: str) -> str:
+    """Drop the ``(gdb)`` prompt echo that MI console streams include."""
+    lines = [ln for ln in text.splitlines() if ln.strip() and ln.strip() != "(gdb)"]
+    return "\n".join(lines)
+
+
+def _debug_where(session: DebugSession) -> None:
+    try:
+        frames = session.backtrace(1)
+    except FocdbgError:
+        return
+    if frames:
+        print(f"  at {frames[0].short}")
+
+
+def _debug_wait(session: DebugSession, timeout: float) -> None:
+    try:
+        event = session.wait_for_stop(timeout)
+    except GdbTimeoutError:
+        print(f"target still running (no stop within {timeout:g}s)")
+        return
+    print(event.summary if event else "stopped")
+
+
+def _debug_exec(session: DebugSession, line: str, timeout: float) -> bool:
+    """Run one session command; returns False to leave the session."""
+    import shlex
+
+    try:
+        argv = shlex.split(line)
+    except ValueError as exc:
+        print(f"parse error: {exc}")
+        return True
+    if not argv:
+        return True
+    cmd, rest = argv[0].lower(), argv[1:]
+
+    if cmd in ("quit", "exit", "q"):
+        return False
+    if cmd in ("help", "h", "?"):
+        print(_DEBUG_HELP)
+    elif cmd in ("break", "b"):
+        if not rest:
+            print("usage: break <symbol|file:line|0xADDR>")
+        else:
+            print(session.set_breakpoint(" ".join(rest), hardware=True).describe())
+    elif cmd in ("bps", "breakpoints"):
+        bps = session.list_breakpoints()
+        print("\n".join(b.describe() for b in bps) if bps else "no breakpoints")
+    elif cmd in ("delete", "d"):
+        bps = session.list_breakpoints()
+        if rest:
+            session.remove_breakpoint(int(rest[0], 0))
+            print(f"deleted breakpoint {rest[0]}")
+        else:
+            for bp in bps:
+                session.remove_breakpoint(bp.number)
+            print(f"deleted {len(bps)} breakpoint(s)")
+    elif cmd in ("run", "continue", "c", "r"):
+        session.resume()
+        _debug_wait(session, timeout)
+        _debug_where(session)
+    elif cmd in ("step", "s", "next", "n", "si"):
+        count = int(rest[0], 0) if rest else 1
+        if cmd == "si":
+            event = session.step(instruction=True, count=count)
+        else:
+            event = session.step(into=cmd in ("step", "s"), count=count)
+        print(event.summary)
+        _debug_where(session)
+    elif cmd == "halt":
+        event = session.halt()
+        print(event.summary if event else "halted")
+        _debug_where(session)
+    elif cmd in ("bt", "backtrace"):
+        limit = int(rest[0], 0) if rest else 32
+        for frame in session.backtrace(limit):
+            print(f"#{frame.level:<3} {frame.short}")
+    elif cmd in ("frame", "f"):
+        if not rest:
+            print("usage: frame <N>")
+        else:
+            session.select_frame(int(rest[0], 0))
+            print(f"frame {rest[0]}")
+    elif cmd in ("locals", "args"):
+        try:
+            text = _console_text(session.gdb(f"info {cmd}"))
+        except FocdbgError as exc:
+            text = f"error: {exc}"
+        print(text or f"no {cmd}")
+    elif cmd in ("print", "p", "eval"):
+        if not rest:
+            print("usage: print <expression>")
+        else:
+            expression = " ".join(rest)
+            print(f"{expression} = {session.evaluate(expression)}")
+    elif cmd in ("regs", "registers"):
+        for name, value in session.read_registers(rest or None).items():
+            print(f"{name:<6} {value.hex}")
+    elif cmd == "info":
+        info = session.target_info()
+        state = "running" if not info.halted else "halted"
+        print(f"backend: {session.backend_name}  state: {state}  pc: {to_hex(info.pc)}"
+              f"  voltage: {info.voltage}")
+    elif cmd in ("gdb", "console"):
+        if rest:
+            print(_console_text(session.gdb(" ".join(rest))))
+    else:
+        print(f"unknown command {cmd!r} (try 'help')")
+    return True
+
+
+def _cmd_debug(args: argparse.Namespace) -> int:
+    session = _open_session(args)
+    timeout = float(getattr(args, "timeout", 30.0) or 30.0)
+    try:
+        info = session.target_info()
+        state = "running" if not info.halted else "halted"
+        print(f"{session.backend_name}: {state}  pc {to_hex(info.pc)}", file=sys.stderr)
+
+        scripted = list(getattr(args, "debug_cmd", None) or [])
+        if scripted:
+            for line in scripted:
+                if not _debug_exec(session, line, timeout):
+                    break
+            return 0
+
+        print("embdbg debug session -- 'help' for commands, 'quit' to exit")
+        while True:
+            try:
+                line = input("(embdbg) ")
+            except (EOFError, KeyboardInterrupt):
+                print()
+                break
+            if not _debug_exec(session, line, timeout):
+                break
+        return 0
+    finally:
+        if not getattr(args, "leave_halted", False):
+            try:
+                session.resume()
+            except FocdbgError:
+                pass
+        session.disconnect()
+
+
 def _cmd_gdbserver(args: argparse.Namespace) -> int:
     json_mode = bool(getattr(args, "json", False))
     config = _make_config(args)
+    if config.is_openocd:
+        # openocd itself is the GDB server; "run it and print the spec" is the
+        # whole job (the same code path as `serve` without sampling)
+        return _serve_openocd(args, config)
     if not config.device:
         raise ConfigError("no target device configured (pass --device)")
     server_exe = find_jlink_server(config.jlink_server)
@@ -566,8 +912,107 @@ def _cmd_serial(args: argparse.Namespace) -> int:
 # ----------------------------------------------------------------------
 # one-process server: GDB RSP + sampling
 # ----------------------------------------------------------------------
+def _start_sampling(probe, config: Config, args: argparse.Namespace, stop_event: threading.Event):
+    """Set up ``--sample`` / ``--sample-fields``; returns ``(thread, out)``.
+
+    ``probe`` is either a JLinkProbe or an OpenOcdProbe -- both expose
+    ``read_memory``, which is all :class:`Sampler` needs.
+    """
+    if not (getattr(args, "sample", None) or getattr(args, "sample_address", None)):
+        return None, None
+
+    if args.sample_address:
+        address = int(str(args.sample_address), 0)
+    else:
+        if not config.elf:
+            raise ConfigError("--elf is required with --sample (symbol resolution)")
+        address = ElfSymbols(config.elf).resolve(args.sample)
+    fields = parse_fields(args.sample_fields) if args.sample_fields else []
+    layout_size = fields_size(fields) if fields else 0
+    size = args.sample_size if args.sample_size is not None else layout_size
+    if size <= 0:
+        raise ConfigError("--sample-size is required when --sample-fields is absent")
+    if layout_size and size < layout_size:
+        raise ConfigError(f"--sample-size {size} is smaller than the layout ({layout_size})")
+    out = open(args.sample_out, "w", newline="", encoding="utf-8") if args.sample_out else sys.stdout
+    if args.sample_format == "csv":
+        print(csv_header(fields), file=out)
+
+    def on_sample(sample) -> None:
+        print(format_sample(sample, fields, args.sample_format), file=out)
+        if sample.index % 64 == 0:
+            out.flush()
+
+    sampler = Sampler(probe, address, size, fields, rate_hz=args.rate, halt=False, stop_event=stop_event)
+
+    def run_sampler() -> None:
+        try:
+            sampler.run(on_sample)
+        except Exception as exc:
+            print(f"sampling stopped: {exc}", file=sys.stderr)
+        finally:
+            out.flush()
+
+    thread = threading.Thread(target=run_sampler, name="embdbg-sampler", daemon=True)
+    thread.start()
+    target = args.sample or args.sample_address
+    where = f" -> {args.sample_out}" if args.sample_out else ""
+    print(f"sampling {target} @ {args.rate:g} Hz{where}", file=sys.stderr)
+    return thread, out
+
+
+def _serve_openocd(args: argparse.Namespace, config: Config) -> int:
+    """The OpenOCD shape of ``serve``.
+
+    openocd already speaks GDB RSP, so there is nothing to proxy: start it with
+    both a GDB port and a TCL port, point the debugger at the GDB port, and run
+    the sampler against TCL.  Debugger and live sampling therefore work at the
+    same time, which is exactly what ``serve`` gives you on J-Link.
+    """
+    exe = find_openocd(config.openocd)
+    if not config.openocd_config:
+        raise ConfigError("--openocd-config is required with the openocd backend")
+
+    server = OpenOcdServer(
+        exe,
+        config.openocd_config,
+        speed_khz=config.speed_khz or None,
+        gdb_port=getattr(args, "port", None) or None,
+        base_port=config.base_port,
+        extra_args=config.openocd_args,
+    )
+    server.start()
+    probe = None
+    stop_event = threading.Event()
+    out = None
+    try:
+        probe = OpenOcdProbe(exe, config.openocd_config, tcl_port=server.tcl_port).open()
+        spec = f"127.0.0.1:{server.port}"
+        print(f"openocd pid {server.pid}: gdb {spec}, tcl {server.tcl_port}", file=sys.stderr)
+        elf = config.elf or "<elf>"
+        print(f'  arm-none-eabi-gdb "{elf}" -ex "target extended-remote {spec}"', file=sys.stderr)
+        _, out = _start_sampling(probe, config, args, stop_event)
+        while server.is_alive():
+            time.sleep(0.2)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stop_event.set()
+        if probe is not None:
+            probe.close()
+        server.stop()
+        if out is not None and out is not sys.stdout:
+            try:
+                out.close()
+            except Exception:  # pragma: no cover
+                pass
+    return 0
+
+
 def _cmd_serve(args: argparse.Namespace) -> int:
     config = _make_config(args)
+    if config.is_openocd:
+        return _serve_openocd(args, config)
     if not config.device:
         raise ConfigError("no target device configured (pass --device)")
     probe = JLinkProbe(
@@ -605,52 +1050,7 @@ def _cmd_serve(args: argparse.Namespace) -> int:
             manager.start_all()
             print("plugins: " + ", ".join(sorted(manager.plugins)), file=sys.stderr)
 
-        if args.sample or args.sample_address:
-            if args.sample_address:
-                address = int(str(args.sample_address), 0)
-            else:
-                if not config.elf:
-                    raise ConfigError("--elf is required with --sample (symbol resolution)")
-                address = ElfSymbols(config.elf).resolve(args.sample)
-            fields = parse_fields(args.sample_fields) if args.sample_fields else []
-            layout_size = fields_size(fields) if fields else 0
-            size = args.sample_size if args.sample_size is not None else layout_size
-            if size <= 0:
-                raise ConfigError("--sample-size is required when --sample-fields is absent")
-            if layout_size and size < layout_size:
-                raise ConfigError(f"--sample-size {size} is smaller than the layout ({layout_size})")
-            out = open(args.sample_out, "w", newline="", encoding="utf-8") if args.sample_out else sys.stdout
-            if args.sample_format == "csv":
-                print(csv_header(fields), file=out)
-
-            def on_sample(sample) -> None:
-                print(format_sample(sample, fields, args.sample_format), file=out)
-                if sample.index % 64 == 0:
-                    out.flush()
-
-            sampler = Sampler(
-                probe,
-                address,
-                size,
-                fields,
-                rate_hz=args.rate,
-                halt=False,
-                stop_event=stop_event,
-            )
-
-            def run_sampler() -> None:
-                try:
-                    sampler.run(on_sample)
-                except Exception as exc:
-                    print(f"sampling stopped: {exc}", file=sys.stderr)
-                finally:
-                    out.flush()
-
-            sampler_thread = threading.Thread(target=run_sampler, name="embdbg-sampler", daemon=True)
-            sampler_thread.start()
-            target = args.sample or args.sample_address
-            where = f" -> {args.sample_out}" if args.sample_out else ""
-            print(f"sampling {target} @ {args.rate:g} Hz{where}", file=sys.stderr)
+        sampler_thread, out = _start_sampling(probe, config, args, stop_event)
 
         port = args.port if args.port is not None else config.base_port
         server = RspServer(probe, host=args.host, port=port, on_event=lambda m: print(f"[rsp] {m}", file=sys.stderr))
@@ -883,14 +1283,37 @@ def _read_config(args: argparse.Namespace) -> Config:
             config.elf = str(discovered)
     if not config.elf:
         raise ConfigError("--elf is required (DWARF symbol resolution)")
-    if not config.device:
-        raise ConfigError("no target device configured (pass --device or set device in embdbg.toml)")
+    _require_probe_config(config)
     return config
 
 
-def _open_probe(config: Config) -> JLinkProbe:
+def _require_probe_config(config: Config) -> None:
+    """Probe-level commands need a device (J-Link) or a board config (openocd)."""
+    if config.is_openocd:
+        if not config.openocd_config:
+            raise ConfigError("--openocd-config is required with the openocd backend")
+        return
+    if not config.device:
+        raise ConfigError(
+            "no target device configured (pass --device or set device in embdbg.toml)"
+        )
+
+
+def _open_probe(config: Config):
+    """Open the low-level probe for the configured backend.
+
+    Both probes expose ``read_memory``/``write_memory``/``halt``/``go``/
+    ``reset``/``flash``/``flash_file``/``close``; ``read``, ``write``, ``hss``
+    and ``flash`` therefore do not care which one they get.
+    """
+    if config.is_openocd:
+        if not config.openocd_config:
+            raise ConfigError("--openocd-config is required with the openocd backend")
+        probe = OpenOcdProbe(find_openocd(config.openocd), config.openocd_config)
+        probe.open()
+        return probe
     probe = JLinkProbe(
-        config.device,
+        config.device or "",
         interface=config.interface,
         speed_khz=config.speed_khz,
         serial=config.probe_serial,
@@ -955,8 +1378,12 @@ def _literal_field(expr: str):
 
 def _cmd_rtt(args: argparse.Namespace) -> int:
     config = _make_config(args)
-    if not config.device:
-        raise ConfigError("no target device configured")
+    if config.is_openocd:
+        raise ConfigError(
+            "RTT needs the J-Link DLL; the openocd backend cannot read it. "
+            "Use the board's UART console instead."
+        )
+    _require_probe_config(config)
     probe = _open_probe(config)
     data = bytearray()
     rtt_addr = 0
@@ -992,8 +1419,7 @@ def _cmd_read(args: argparse.Namespace) -> int:
         discovered = find_elf(None, Path.cwd())
         if discovered is not None:
             config.elf = str(discovered)
-    if not config.device:
-        raise ConfigError("no target device configured")
+    _require_probe_config(config)
     probe = _open_probe(config)
     try:
         field = _literal_field(args.expr)
@@ -1020,8 +1446,7 @@ def _cmd_write(args: argparse.Namespace) -> int:
         discovered = find_elf(None, Path.cwd())
         if discovered is not None:
             config.elf = str(discovered)
-    if not config.device:
-        raise ConfigError("no target device configured")
+    _require_probe_config(config)
     probe = _open_probe(config)
     try:
         field = _literal_field(args.expr)
@@ -1069,15 +1494,11 @@ def _cmd_hss(args: argparse.Namespace) -> int:
     fields = _hss_fields(dwarf, exprs, structs, args.recursive)
     blocks = _hss_blocks(fields, max(1, args.max_span), max(0, args.coalesce_gap))
 
-    if not config.device:
-        raise ConfigError("no target device configured (pass --device)")
-    probe = JLinkProbe(
-        config.device,
-        interface=config.interface,
-        speed_khz=config.speed_khz,
-        serial=config.probe_serial,
-    )
-    probe.open()
+    probe = _open_probe(config)
+    if config.is_openocd:
+        # the probe-side HSS engine lives in the J-Link DLL; with openocd we
+        # fall back to the manual (host-side) sampler
+        args.no_native = True
 
     out = None
     samples = 0

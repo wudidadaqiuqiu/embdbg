@@ -23,8 +23,11 @@ embdbg.DebugSession ──► Backend (pluggable)
 - **read / write**：支持字段、数组、位域、结构体指针链
   （`g_state.counter`、`cfg.tbl[3]`、`a->b->c`、`*p`、`0x20000208:float`）；
 - **HSS**：按 DWARF 解析字段/结构体，高速采样，不停核；
+- **debug**：交互会话里下断点、单步、看调用栈 / 局部变量 / 寄存器；
 - **RTT**：读 SEGGER RTT 上行通道；
 - **flash**：默认走 J-Link DLL（和 Ozone 同级速度），也保留 GDB-server 路径；
+- **两个后端**：`jlink-gdb`（J-Link DLL + JLinkGDBServerCL）和
+  `openocd-gdb`（openocd 支持的任意探针：ST-Link、CMSIS-DAP……）；
 - **serve / gdbserver**：给 Ozone 或 `arm-none-eabi-gdb` 提供 GDB RSP
   （断点、单步、实时采样）；
 - **serial**：串口助手 + 插件；
@@ -32,6 +35,7 @@ embdbg.DebugSession ──► Backend (pluggable)
 
 ## 文档
 
+- [后端：J-Link 与 OpenOCD（ST-Link / CMSIS-DAP）](docs/openocd.md)
 - [Flash：J-Link DLL vs GDB server、复位时钟](docs/flash.md)
 - [符号解析：DWARF、指针、字面地址](docs/symbols.md)
 - [HSS：字段布局与采样率选择](docs/hss.md)
@@ -47,11 +51,12 @@ pip install "embdbg[serve,serial]"   # pylink-square + pyelftools + pyserial
 环境要求：
 
 - **操作系统：目前只支持 Windows**（Windows 10/11 x64）；Linux/macOS 暂不支持，
-  因为后端直接调用 `JLinkGDBServerCL.exe` / `JLink.exe` 和 Windows 版 J-Link DLL。
+  J-Link 后端直接调用 `JLinkGDBServerCL.exe` / `JLink.exe` 和 Windows 版 J-Link DLL。
 - Python ≥ 3.10；
-- GNU Arm 工具链（`arm-none-eabi-gdb`）——GDB 后端、`serve`；
-- SEGGER J-Link 软件（`JLinkGDBServerCL.exe`、`JLink.exe`）——探针访问；
-- 一块 J-Link 探针和目标板。
+- GNU Arm 工具链（`arm-none-eabi-gdb`）；
+- **J-Link 后端**：SEGGER J-Link 软件 + 一块 J-Link 探针；
+- **OpenOCD 后端**：`openocd`（如 `winget install xpack-dev-tools.openocd-xpack`）
+  + 其板级配置支持的任意探针 —— 不需要 J-Link 硬件。
 
 ## 快速开始
 
@@ -82,7 +87,14 @@ embdbg serve                     # Ozone / gdb: target extended-remote :2331
 
 ```toml
 [embdbg]
+backend = "jlink-gdb"            # jlink-gdb | openocd-gdb
+
+# J-Link 后端
 device = "STM32G431CB"           # J-Link 器件名
+# OpenOCD 后端（不需要 device）
+# openocd_config = "debug/openocd/artpi.cfg"
+# openocd = "C:/path/to/openocd.exe"
+
 interface = "SWD"                # SWD | JTAG
 speed_khz = 4000
 
@@ -99,8 +111,8 @@ verify = true                    # 烧写后校验
 singlerun = true
 ```
 
-通用参数：`--config`、`--device`、`--interface`、`--speed`、`--elf`、
-`--probe-serial`、`--json`、`-v`。
+通用参数：`--config`、`--backend`、`--device`、`--interface`、`--speed`、`--elf`、
+`--openocd`、`--openocd-config`、`--probe-serial`、`--json`、`-v`。
 
 ## 命令
 
@@ -144,15 +156,52 @@ embdbg flash firmware.elf --gdb-flash   # 慢路径，仅对比用
 
 细节见 [HSS](docs/hss.md)、[RTT](docs/rtt.md)、[Flash](docs/flash.md)。
 
-### serve / gdbserver（断点调试）
+### debug（断点 / 单步 / 变量）
+
+交互式会话。必须是会话而不是一堆一次性命令：**OpenOCD 在 GDB 断开时会把断点撤掉**
+（实测 detach 后 `bp` 列表为空）。
 
 ```bash
-embdbg serve --port 2331
-embdbg gdbserver --port 2331 --timeout 60
+embdbg debug                                  # 进入 REPL
+embdbg debug -c "break rt_pin_write" -c run -c bt -c "frame 1" -c locals -c quit
 ```
 
-Ozone 或 `arm-none-eabi-gdb` 用 `target extended-remote 127.0.0.1:2331` 连接。
-GDB server 与 DLL 命令互斥：跑 `read`/`hss`/`rtt`/`flash` 前先停掉它。
+```text
+(embdbg) break rt_pin_write
+1	rt_pin_write (pin.c:145)
+(embdbg) run
+breakpoint 1: rt_pin_write at pin.c:145
+  at rt_pin_write at pin.c:145
+(embdbg) bt
+#0   rt_pin_write at pin.c:145
+#1   main at main.c:26
+(embdbg) frame 1
+(embdbg) locals
+count = 505
+(embdbg) print rt_tick
+rt_tick = 504001
+```
+
+命令：`break|b`、`bps`、`delete|d`、`run|continue|c`、`step|s`、`next|n`、`si`、
+`bt`、`frame|f`、`locals`、`args`、`print|p`、`regs`、`halt`、`info`、
+`gdb <原生命令>`、`help`、`quit`。两个后端都能用；断点默认硬件断点
+（`hw_breakpoints = true`），因为代码在 flash 上跑。
+
+### serve / gdbserver（断点调试）
+
+J-Link 下 `serve` 独占探针、自己实现 GDB RSP，顺带做实时采样；`gdbserver` 只起
+SEGGER 的 server。Ozone 或 `arm-none-eabi-gdb` 用
+`target extended-remote 127.0.0.1:2331` 连接。GDB server 与 DLL 命令互斥：
+跑 `read`/`hss`/`rtt`/`flash` 前先停掉它。
+
+OpenOCD 后端下这两个命令改起 **openocd 本身**（它天生就是 GDB server，不需要代理），
+采样留在 TCL 端口，所以**调试器和采样可以同时跑**：
+
+```bash
+embdbg serve --sample rt_tick --sample-size 4 --rate 20 --sample-out ticks.csv
+# openocd pid 1234: gdb 127.0.0.1:2331, tcl 2332
+#   arm-none-eabi-gdb "<elf>" -ex "target extended-remote 127.0.0.1:2331"
+```
 
 ### serial / plugins
 
@@ -207,3 +256,6 @@ skip。
   和字面地址；任意 C 表达式（cast/算术）不解析——用 `0xADDR:type` 或 GDB；
 - HSS 的指针目标在开始时解析一次，采样过程中指针变化不会重新求值；
 - J-Link DLL 是快路径；GDB flash 路径只为对比/调试保留。
+- **OpenOCD 后端**：`read/write/hss` 走 TCL，仍然不停核；但 `rtt`、`serve`、
+  `gdbserver` 不可用（RTT 是 J-Link DLL 的特性，RSP 代理同理），
+  HSS 会退化为宿主机侧采样（`--no-native`）。详见 [docs/openocd.md](docs/openocd.md)。

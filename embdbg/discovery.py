@@ -130,6 +130,30 @@ def _segger_patterns(executable: str) -> list[str]:
     ]
 
 
+def find_openocd(explicit: str | None = None) -> Path:
+    """Locate ``openocd`` (PATH, xPack/winget install, or common prefixes)."""
+    candidates = [explicit, shutil.which("openocd"), shutil.which("openocd.exe")]
+    candidates.append(
+        _glob_latest(
+            [
+                r"%LOCALAPPDATA%\Microsoft\WinGet\Packages\xpack-dev-tools.openocd-xpack_*\xpack-openocd-*\bin\openocd.exe",
+                r"C:\Program Files\xPack\OpenOCD\*\bin\openocd.exe",
+                r"C:\Program Files (x86)\OpenOCD\*\bin\openocd.exe",
+                r"/usr/bin/openocd",
+                r"/usr/local/bin/openocd",
+            ]
+        )
+    )
+    found = _first_file(candidates)
+    if found is None:
+        raise ToolNotFoundError(
+            "openocd",
+            "install it (winget install xpack-dev-tools.openocd-xpack) and set "
+            "--openocd / FOCDBG_OPENOCD",
+        )
+    return found
+
+
 def find_elf(explicit: str | None = None, search_root: str | os.PathLike | None = None) -> Path | None:
     """Find an ELF, preferring an explicit path then ``build/Debug``."""
     if explicit:
@@ -208,5 +232,22 @@ def gdb_version(gdb: str | os.PathLike) -> str | None:
         )
         first = (proc.stdout or "").splitlines()
         return first[0].strip() if first else None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def openocd_version(openocd: str | os.PathLike) -> str | None:
+    """First line of ``openocd --version`` (e.g. ``xPack Open On-Chip Debugger 0.12.0``)."""
+    try:
+        proc = subprocess.run(
+            [str(openocd), "--version"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=15,
+        )
+        lines = (proc.stdout or proc.stderr or "").splitlines()
+        return lines[0].strip() if lines else None
     except (OSError, subprocess.SubprocessError):
         return None

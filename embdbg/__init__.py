@@ -9,6 +9,7 @@ from __future__ import annotations
 from .config import Config
 from .dwarf_symbols import DwarfSymbols, ResolvedField
 from .jlink_probe import JLinkProbe
+from .openocd_probe import OpenOcdProbe
 from .errors import (
     ConfigError,
     FocdbgError,
@@ -38,6 +39,7 @@ __all__ = [
     "TargetInfo",
     "Sampler",
     "JLinkProbe",
+    "OpenOcdProbe",
     "Plugin",
     "PluginManager",
     "RspServer",

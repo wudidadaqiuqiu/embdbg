@@ -17,6 +17,7 @@ The CLI is implemented entirely in terms of this class.
 from __future__ import annotations
 
 import threading
+from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from .backend import Backend, create_backend
@@ -38,12 +39,22 @@ class DebugSession:
         self,
         config: Config | None = None,
         *,
-        backend: str = "jlink-gdb",
+        backend: str | None = None,
         autoconnect: bool = False,
     ):
         self.config = config or Config.load()
-        self._backend: Backend = create_backend(backend, self.config)
-        self.backend_name = backend
+        if not self.config.elf:
+            # The CLI discovers the ELF; do the same for API users, otherwise
+            # `set_breakpoint("main")` silently becomes a pending breakpoint
+            # GDB cannot resolve ("No symbol table is loaded").
+            from .discovery import find_elf
+
+            found = find_elf(None, Path.cwd())
+            if found is not None:
+                self.config.elf = str(found)
+        backend_name = backend or self.config.backend
+        self._backend: Backend = create_backend(backend_name, self.config)
+        self.backend_name = self._backend.name
         self._lock = threading.RLock()
         self._listeners: dict[str, list[Callable[[Any], None]]] = {"stop": [], "output": []}
         if autoconnect:
