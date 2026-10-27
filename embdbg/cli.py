@@ -1628,6 +1628,10 @@ def _cmd_hss(args: argparse.Namespace) -> int:
         # the probe-side HSS engine lives in the J-Link DLL; with openocd we
         # fall back to the manual (host-side) sampler
         args.no_native = True
+    if args.no_run:
+        # `_open_probe` does not halt on open (J-Link used to), so --no-run has
+        # to stop the core explicitly; otherwise it is resumed before sampling.
+        probe.halt()
 
     out = None
     samples = 0
