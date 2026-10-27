@@ -23,6 +23,8 @@ embdbg.DebugSession ──► Backend (pluggable)
 - **read / write** symbols with fields, arrays, bit-fields and chained struct pointers
   (`g_state.counter`, `cfg.tbl[3]`, `a->b->c`, `*p`, `0x20000208:float`);
 - **HSS** high-speed sampling of DWARF fields or whole structs (no halt);
+- **ring** drain a firmware ring buffer with block reads (1 kHz+ without a
+  USB round trip per sample);
 - **debug** interactive session: breakpoints, stepping, backtrace, locals, registers;
 - **RTT** up-channel read (SEGGER Real Time Transfer);
 - **flash** with the J-Link DLL (fast, like Ozone) or the GDB-server path;
@@ -37,6 +39,7 @@ embdbg.DebugSession ──► Backend (pluggable)
 - [Flash: J-Link DLL vs GDB server, reset clock](docs/flash.md)
 - [Symbol resolution: DWARF, pointers, literals](docs/symbols.md)
 - [HSS: field layout and rate](docs/hss.md)
+- [Ring buffer + block read: 1 kHz sampling](docs/ring.md)
 - [RTT: firmware integration and tool](docs/rtt.md)
 
 ## Install
@@ -186,7 +189,9 @@ Aggregates (whole structs/arrays) are rejected by `read`/`write`; use `hss
 ### hss — high-speed sampling
 
 Uses the J-Link HSS engine; fields are resolved from DWARF, so structs, arrays
-and bit-fields are flattened automatically. The core keeps running.
+and bit-fields are flattened automatically. The core keeps running. With the
+OpenOCD backend it falls back to host-side sampling (one USB round trip per
+sample, ~1.5 kHz ceiling).
 
 ```bash
 embdbg hss --list-fields --struct "g_motor.state"          # print layout only
@@ -194,6 +199,20 @@ embdbg hss --struct "g_motor.state" --rate 1000 --duration 2 --out cap.csv
 embdbg hss --expr "g_motor.state.speed" --expr "g_motor.state.iq" \
     --rate 500 --duration 3 --format jsonl --out cap.jsonl
 ```
+
+### ring — firmware ring buffer (1 kHz without per-sample USB trips)
+
+For sustained 1 kHz with several channels, let the firmware record into a ring
+buffer and drain it in blocks -- see [docs/ring.md](docs/ring.md):
+
+```bash
+embdbg ring --buffer g_trace_buf --head g_trace_head \
+            --fields "t:u32,a:i32,b:i32,seq:u32" --rate 10 --duration 5 --out trace.csv
+```
+
+Firmware side is ~10 lines ([examples/firmware/trace_ring.h](examples/firmware/trace_ring.h));
+measured on an ART-Pi: 1 kHz producer, 0 records dropped at 10 Hz and even at
+1 Hz polling.
 
 - `--rate` default 500 Hz; probe-side HSS can reach ~1 kHz (fewer fields = faster);
 - `--max-span` and `--coalesce-gap` coalesce neighbouring fields into one block;

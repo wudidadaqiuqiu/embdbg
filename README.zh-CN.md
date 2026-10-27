@@ -23,6 +23,7 @@ embdbg.DebugSession ──► Backend (pluggable)
 - **read / write**：支持字段、数组、位域、结构体指针链
   （`g_state.counter`、`cfg.tbl[3]`、`a->b->c`、`*p`、`0x20000208:float`）；
 - **HSS**：按 DWARF 解析字段/结构体，高速采样，不停核；
+- **ring**：固件环形缓冲 + 块读，1 kHz 采样不需要每样本一次 USB 往返；
 - **debug**：交互会话里下断点、单步、看调用栈 / 局部变量 / 寄存器；
 - **RTT**：读 SEGGER RTT 上行通道；
 - **flash**：默认走 J-Link DLL（和 Ozone 同级速度），也保留 GDB-server 路径；
@@ -39,6 +40,7 @@ embdbg.DebugSession ──► Backend (pluggable)
 - [Flash：J-Link DLL vs GDB server、复位时钟](docs/flash.md)
 - [符号解析：DWARF、指针、字面地址](docs/symbols.md)
 - [HSS：字段布局与采样率选择](docs/hss.md)
+- [环形缓冲 + 块读：1 kHz 采样](docs/ring.md)
 - [RTT：固件集成与工具用法](docs/rtt.md)
 
 ## 安装
@@ -155,6 +157,20 @@ embdbg flash firmware.elf --gdb-flash   # 慢路径，仅对比用
 ```
 
 细节见 [HSS](docs/hss.md)、[RTT](docs/rtt.md)、[Flash](docs/flash.md)。
+
+### ring（固件环形缓冲 + 块读）
+
+主机轮询每个样本一次 USB 往返（ST-Link 上 0.62 ms），上限约 1.5 kHz。
+要 1 kHz、多通道、零丢样，就让固件自己记录：
+
+```bash
+embdbg ring --buffer g_trace_buf --head g_trace_head \
+            --fields "t:u32,a:i32,b:i32,seq:u32" --rate 10 --duration 5 --out trace.csv
+```
+
+固件侧约 10 行（[examples/firmware/trace_ring.h](examples/firmware/trace_ring.h)）；
+实测 ART-Pi 1 kHz 生产者：10 Hz 轮询 0 丢样，1 Hz 轮询也 0 丢样。
+细节见 [环形缓冲](docs/ring.md)。
 
 ### debug（断点 / 单步 / 变量）
 

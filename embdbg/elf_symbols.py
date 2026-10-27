@@ -8,7 +8,7 @@ from .errors import ConfigError, TargetError
 
 
 class ElfSymbols:
-    """Name -> address map for OBJECT/FUNC symbols in an ELF file."""
+    """Name -> address/size map for OBJECT/FUNC symbols in an ELF file."""
 
     def __init__(self, path: str | Path):
         self.path = str(path)
@@ -19,6 +19,7 @@ class ElfSymbols:
             raise ConfigError("pyelftools is required; run: pip install pyelftools") from exc
 
         self._symbols: dict[str, int] = {}
+        self._sizes: dict[str, int] = {}
         try:
             with open(self.path, "rb") as fh:
                 elf = ELFFile(fh)
@@ -33,6 +34,9 @@ class ElfSymbols:
                         if value == 0:
                             continue
                         self._symbols.setdefault(name, value & ~1)
+                        # st_size is what lets `embdbg ring` infer the capacity
+                        # of a trace buffer without an extra option.
+                        self._sizes.setdefault(name, int(sym["st_size"]))
         except OSError as exc:
             raise ConfigError(f"cannot read ELF {self.path}: {exc}") from exc
 
@@ -50,6 +54,15 @@ class ElfSymbols:
         if address is None:
             raise TargetError(f"symbol {name!r} not found in {self.path}")
         return address
+
+    def size_of(self, name: str) -> int:
+        """Size in bytes of an object symbol, or 0 when the ELF does not know."""
+        if name in self._sizes:
+            return self._sizes[name]
+        suffix = [k for k in self._sizes if k.endswith(name)]
+        if len(suffix) == 1:
+            return self._sizes[suffix[0]]
+        return 0
 
     @property
     def symbols(self) -> dict[str, int]:

@@ -47,6 +47,7 @@ from .jlink_probe import JLinkProbe
 from .openocd import OpenOcdServer
 from .openocd_probe import OpenOcdProbe
 from .rsp import RspServer
+from .ring import RingLayout, RingReader
 from .models import ProbeInfo, to_dict
 from .plugin_cli import add_serial_options, cmd_plugins, cmd_serial
 from .plugins.base import PluginContext, PluginManager
@@ -251,6 +252,23 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--coalesce-gap", type=int, default=32, help="max gap in bytes between fields to coalesce")
     _add_common(p, suppress=True)
 
+    p = sub.add_parser(
+        "ring",
+        help="drain a firmware ring buffer with block reads (no halt, no per-sample USB trip)",
+    )
+    p.add_argument("--buffer", required=True, help="trace buffer symbol (array of records)")
+    p.add_argument("--head", required=True, help="u32 head counter symbol (monotonic)")
+    p.add_argument("--fields", default=None, help="record layout: t:u32,iq:i32,id:i32[@offset]")
+    p.add_argument("--record-size", type=int, default=None, help="record size in bytes (default: from --fields)")
+    p.add_argument("--capacity", type=int, default=None, help="records in the buffer (default: from the ELF symbol size)")
+    p.add_argument("--rate", type=float, default=10.0, help="polls per second (default 10)")
+    p.add_argument("--duration", type=float, default=None, help="stop after N seconds")
+    p.add_argument("--count", type=int, default=None, help="stop after N records")
+    p.add_argument("--from-start", action="store_true", help="also emit the records already buffered")
+    p.add_argument("--out", default=None, help="write CSV/JSONL here instead of stdout")
+    p.add_argument("--format", choices=("csv", "jsonl"), default="csv")
+    _add_common(p, suppress=True)
+
     return parser
 
 
@@ -301,6 +319,7 @@ def _dispatch(args: argparse.Namespace) -> int:
         "serve": _cmd_serve,
         "gdb": _cmd_serve,
         "hss": _cmd_hss,
+        "ring": _cmd_ring,
     }
     return handlers[args.command](args)
 
@@ -1485,6 +1504,100 @@ def _cmd_write(args: argparse.Namespace) -> int:
     else:
         print(_format_value(field, readback) + ("  OK" if ok else "  MISMATCH"))
     return 0 if ok else 1
+
+
+def _cmd_ring(args: argparse.Namespace) -> int:
+    """Drain a firmware ring buffer; the sampling clock lives in the firmware."""
+    config = _make_config(args)
+    _require_probe_config(config)
+    if not config.elf:
+        raise ConfigError("--elf is required (the ring symbols come from the ELF)")
+
+    fields = parse_fields(args.fields) if args.fields else []
+    record_size = int(args.record_size) if args.record_size else (fields_size(fields) if fields else 0)
+    if record_size <= 0:
+        raise ConfigError("pass --fields (record layout) or --record-size")
+
+    symbols = ElfSymbols(config.elf)
+    buffer_address = symbols.resolve(args.buffer)
+    head_address = symbols.resolve(args.head)
+
+    capacity = int(args.capacity) if args.capacity else symbols.size_of(args.buffer) // record_size
+    if capacity <= 0:
+        raise ConfigError("cannot infer the ring capacity from the ELF; pass --capacity")
+    if capacity & (capacity - 1):
+        print(
+            f"note: capacity {capacity} is not a power of two -- the firmware must index with "
+            f"modulo, not a mask",
+            file=sys.stderr,
+        )
+
+    layout = RingLayout(buffer_address, head_address, capacity, record_size)
+    probe = _open_probe(config)
+    reader = RingReader(probe, layout, start_at_head=not args.from_start)
+
+    out = open(args.out, "w", newline="", encoding="utf-8") if args.out else sys.stdout
+    names = [f.name for f in fields]
+    if args.format == "csv":
+        print(",".join(["index"] + names) if names else "index,raw", file=out)
+
+    rate = float(args.rate or 10.0)
+    period = (1.0 / rate) if rate > 0 else 0.0
+    started = time.perf_counter()
+    emitted = 0
+    polls = 0
+    try:
+        while True:
+            poll = reader.poll()
+            polls += 1
+            if poll.dropped:
+                print(
+                    f"warning: writer lapped the reader, {poll.dropped} record(s) lost "
+                    f"(raise --rate or enlarge the buffer)",
+                    file=sys.stderr,
+                )
+            for index, raw in enumerate(poll.records):
+                seq = (poll.first_seq + index) & 0xFFFFFFFF
+                if fields:
+                    values = decode_fields(raw, fields)
+                    row = [str(values[f.name]) for f in fields]
+                else:
+                    row = [raw.hex()]
+                if args.format == "csv":
+                    print(",".join([str(seq)] + row), file=out)
+                else:
+                    payload: dict[str, Any] = {"index": seq}
+                    if fields:
+                        payload.update({f.name: values[f.name] for f in fields})
+                    else:
+                        payload["raw"] = raw.hex()
+                    print(json.dumps(payload), file=out)
+                emitted += 1
+                if args.count is not None and emitted >= args.count:
+                    break
+            out.flush()
+            if args.count is not None and emitted >= args.count:
+                break
+            elapsed = time.perf_counter() - started
+            if args.duration is not None and elapsed >= args.duration:
+                break
+            if period:
+                time.sleep(period)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if out is not sys.stdout:
+            out.close()
+        probe.close()
+
+    elapsed = max(time.perf_counter() - started, 1e-9)
+    print(
+        f"ring: {emitted} record(s) in {elapsed:.2f}s ({emitted / elapsed:.0f}/s), "
+        f"{polls} poll(s), {reader.total_dropped} dropped, "
+        f"{layout.record_size} B/record, capacity {layout.capacity}",
+        file=sys.stderr,
+    )
+    return 0
 
 
 def _cmd_hss(args: argparse.Namespace) -> int:
