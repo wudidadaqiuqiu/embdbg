@@ -148,12 +148,21 @@ def cmd_serial(args: argparse.Namespace, config: Config) -> int:
         _set_if_not_none(options, "timestamp", args.timestamp)
         plugin = SerialPlugin(options)
         plugin.open()
+        sink = None
         try:
-            plugin.monitor(duration=args.duration, out=sys.stdout)
+            out = sys.stdout
+            if args.log:
+                # `log` is honoured by the background monitor (plugins/serve);
+                # the CLI monitor has to open the sink itself.
+                sink = open(args.log, "a", encoding="utf-8", errors="replace", newline="")
+                out = sink
+            plugin.monitor(duration=args.duration, out=out)
         except KeyboardInterrupt:
             pass
         finally:
             plugin.close()
+            if sink is not None:
+                sink.close()
         return 0
 
     raise ConfigError(f"unknown serial command {args.serial_cmd!r}")

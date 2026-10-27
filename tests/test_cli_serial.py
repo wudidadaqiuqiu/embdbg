@@ -74,6 +74,15 @@ class TestPluginCli(unittest.TestCase):
         code, _, _ = run_cli(["serial", "monitor", "--port", "loop://", "--duration", "0.2"])
         self.assertEqual(code, 0)
 
+    def test_serial_monitor_writes_log(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "monitor.log"
+            code, _, _ = run_cli(
+                ["serial", "monitor", "--port", "loop://", "--duration", "0.2", "--log", str(log)]
+            )
+            self.assertEqual(code, 0)
+            self.assertTrue(log.exists(), "--log must create the file in monitor mode")
+
 
 if __name__ == "__main__":
     unittest.main()
