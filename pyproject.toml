@@ -22,5 +22,5 @@ serial = ["pyserial>=3.5"]
 [project.scripts]
 embdbg = "embdbg.cli:main"
 
-[tool.setuptools]
-packages = ["embdbg"]
+[tool.setuptools.packages.find]
+include = ["embdbg", "embdbg.*"]
