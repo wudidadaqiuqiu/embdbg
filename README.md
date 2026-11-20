@@ -359,7 +359,7 @@ firmware/
 ```
 
 ```bash
-pip install -e /path/to/tools[serve,serial]
+cd /path/to/tools && pip install -e ".[serve,serial]"
 python tools/foc_cases/position_step.py
 ```
 
@@ -372,8 +372,8 @@ safety checks in the firmware repository; embdbg stays generic.
 
 ```bash
 python -m venv .venv
-.venv/Scripts/pip install -q pytest pyelftools pylink-square pyserial
-.venv/Scripts/python -m pytest -q      # 96 passed
+.venv/Scripts/pip install -e ".[test]"     # pytest + pyelftools
+.venv/Scripts/python -m pytest -q
 ```
 
 `tests/test_embdbg_readwrite.py` exercises the resolver against the gated

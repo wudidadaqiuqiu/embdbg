@@ -11,7 +11,11 @@ import sys
 import unittest
 from pathlib import Path
 
-from elftools.elf.elffile import ELFFile
+import pytest
+
+# pyelftools is only needed by the DWARF cases; a plain `pip install -e .` should
+# still let the rest of the suite run.
+ELFFile = pytest.importorskip("elftools.elf.elffile").ELFFile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 

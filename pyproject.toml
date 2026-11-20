@@ -18,6 +18,7 @@ classifiers = [
 [project.optional-dependencies]
 serve = ["pylink-square>=2.0", "pyelftools>=0.29"]
 serial = ["pyserial>=3.5"]
+test = ["pytest>=7", "pyelftools>=0.29"]
 
 [project.scripts]
 embdbg = "embdbg.cli:main"
